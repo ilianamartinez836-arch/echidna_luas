@@ -1,0 +1,301 @@
+-- bhop.lua — Auto Bunny Hop | Echidna
+-- LLAC-safe: randomised miss chance, occasional tick delays, consecutive cap.
+
+local CFG = {
+    enabled     = true,
+    -- miss_chance: probability (0-100) of intentionally skipping a hop
+    miss_chance = 12,
+    -- max_streak: force a miss after this many perfect consecutive hops
+    max_streak  = 6,
+    debug       = false,
+}
+local CFG_FILE = "echidna_bhop.cfg"
+
+local IN_JUMP = IN_JUMP or 2
+local floor   = math.floor
+local rand    = math.random
+local unpack_ = unpack or table.unpack
+
+local function has_bit(v, b) return floor(v / b) % 2 == 1 end
+local function log(s) pcall(client.print, "[bhop] " .. tostring(s)) end
+
+-- ─────────────────────────────────────────────
+-- CONFIG PERSISTENCE
+-- ─────────────────────────────────────────────
+
+local function save_cfg()
+    pcall(function()
+        local f = io.open(CFG_FILE, "w")
+        for k, v in pairs(CFG) do f:write(k, "=", tostring(v), "\n") end
+        f:close()
+    end)
+end
+
+pcall(function()
+    local f = io.open(CFG_FILE, "r")
+    if not f then return end
+    for line in f:lines() do
+        local k, v = line:match("^([%w_]+)=(.+)$")
+        if k and CFG[k] ~= nil then
+            if     v == "true"  then CFG[k] = true
+            elseif v == "false" then CFG[k] = false
+            else CFG[k] = tonumber(v) or CFG[k] end
+        end
+    end
+    f:close()
+end)
+
+-- ─────────────────────────────────────────────
+-- GROUND CHECK
+-- ─────────────────────────────────────────────
+
+local function on_ground(lp)
+    local g
+    pcall(function() g = lp:is_on_ground() end)
+    if g == nil then
+        pcall(function() g = has_bit(lp:get_flags(), 1) end)
+    end
+    return g == true
+end
+
+-- ─────────────────────────────────────────────
+-- PLAYER GUARD
+-- ─────────────────────────────────────────────
+
+local function is_valid(lp)
+    local ok = false
+    pcall(function()
+        ok = lp:is_alive()
+            and not lp:is_incapacitated()
+            and lp:get_team() == 2
+    end)
+    return ok
+end
+
+-- ─────────────────────────────────────────────
+-- STATE
+-- ─────────────────────────────────────────────
+
+local state = {
+    last_ground   = false,  -- were we grounded last tick?
+    streak        = 0,      -- consecutive successful hops
+    skip_this_hop = false,  -- decided to miss this landing
+    delay_ticks   = 0,      -- ticks to hold off jumping after landing
+    hops          = 0,
+    misses        = 0,
+}
+
+-- Called once per landing to decide whether to jump or fake-miss
+local function decide_hop()
+    -- Force a miss after too many perfect hops in a row
+    if state.streak >= CFG.max_streak then
+        state.skip_this_hop = true
+        state.streak = 0
+        if CFG.debug then log("streak cap — forcing miss") end
+        return
+    end
+
+    -- Random miss
+    if rand(1, 100) <= CFG.miss_chance then
+        state.skip_this_hop = true
+        state.streak = 0
+        if CFG.debug then log("random miss") end
+        return
+    end
+
+    -- Small chance of a 1-tick delay instead of instant jump (~8%)
+    if rand(1, 100) <= 8 then
+        state.delay_ticks   = 1
+        state.skip_this_hop = false
+        if CFG.debug then log("1-tick delay") end
+        return
+    end
+
+    state.skip_this_hop = false
+    state.delay_ticks   = 0
+end
+
+-- ─────────────────────────────────────────────
+-- MAIN HOOK
+-- ─────────────────────────────────────────────
+
+local me = {}
+_G.echidna_bhop_instance = me
+
+local prev_cm = on_create_move
+function on_create_move(cmd, lp)
+    if prev_cm then pcall(prev_cm, cmd, lp) end
+    if _G.echidna_bhop_instance ~= me then return end
+    if not CFG.enabled or not cmd or not lp then return end
+    if not is_valid(lp) then return end
+
+    local b           = cmd:get_buttons() or 0
+    local space_held  = has_bit(b, IN_JUMP)
+
+    if not space_held then
+        -- Player isn't holding jump; reset landing state
+        state.last_ground   = on_ground(lp)
+        state.skip_this_hop = false
+        state.delay_ticks   = 0
+        return
+    end
+
+    local grounded = on_ground(lp)
+    local just_landed = grounded and not state.last_ground
+
+    -- Decide on each fresh landing
+    if just_landed then
+        decide_hop()
+    end
+
+    if grounded then
+        if state.delay_ticks > 0 then
+            -- Holding off by one tick — strip jump this tick
+            cmd:remove_button(IN_JUMP)
+            state.delay_ticks = state.delay_ticks - 1
+        elseif state.skip_this_hop then
+            -- Intentional miss — don't jump
+            cmd:remove_button(IN_JUMP)
+            if just_landed then
+                state.misses = state.misses + 1
+                if CFG.debug then log(string.format("miss #%d (total hops %d)", state.misses, state.hops)) end
+            end
+        else
+            -- Jump!
+            cmd:add_button(IN_JUMP)
+            if just_landed then
+                state.hops   = state.hops + 1
+                state.streak = state.streak + 1
+                if CFG.debug then log(string.format("hop #%d (streak %d)", state.hops, state.streak)) end
+            end
+        end
+    else
+        -- In the air — always strip so the next landing counts as a new jump
+        cmd:remove_button(IN_JUMP)
+    end
+
+    state.last_ground = grounded
+end
+
+-- ─────────────────────────────────────────────
+-- IMGUI (mirrors edge_jumps IG wrapper)
+-- ─────────────────────────────────────────────
+
+local IG = {
+    button   = imgui.Button    or imgui.button,
+    checkbox = imgui.Checkbox  or imgui.checkbox,
+    text     = imgui.Text      or imgui.text,
+    sep      = imgui.Separator or imgui.separator,
+    space    = imgui.Spacing   or imgui.spacing,
+    sint     = imgui.SliderInt or imgui.slider_int,
+    begin_w  = imgui.Begin     or imgui.begin_window or imgui.begin,
+    finish   = imgui.End       or imgui.end_window,
+}
+
+local W = { value_first = nil, broken = false, last_flip = {} }
+
+local function detect_convention()
+    if W.value_first ~= nil or W.broken then return end
+    for _, fn in ipairs({ IG.sint }) do
+        if fn then
+            local ok, r1, r2 = pcall(fn, "##bhop_det", 0, 0, 1)
+            if ok and type(r1) == "number" then W.value_first = true;  return end
+            if ok and type(r2) == "number" then W.value_first = false; return end
+        end
+    end
+    W.broken = true
+end
+
+local function toggle(key, label)
+    local cur = CFG[key] and true or false
+    if W.broken or W.value_first == nil then
+        local ok, r = pcall(IG.button, (cur and "[ON]  " or "[off] ") .. label .. "##bhop_" .. key)
+        if ok and r == true then return not cur end
+        return cur
+    end
+    local ok, r1, r2 = pcall(IG.checkbox, label .. "##bhop_" .. key, cur)
+    if not ok then W.broken = true; return cur end
+    local new
+    if r2 == nil then
+        if W.value_first then new = r1 else new = (r1 == true) and not cur or cur end
+    elseif W.value_first then new = r1 else new = r2 end
+    if type(new) ~= "boolean" then W.broken = true; return cur end
+    if new ~= cur then
+        local t = os and os.clock and os.clock() or 0
+        if W.last_flip[key] and t - W.last_flip[key] < 0.05 then W.broken = true; return cur end
+        W.last_flip[key] = t
+    end
+    return new
+end
+
+local function slider_int(key, label, lo, hi)
+    if not IG.sint then return end
+    local ok, r1, r2 = pcall(IG.sint, label .. "##bhop_" .. key, CFG[key], lo, hi)
+    if not ok then return end
+    local v = W.value_first and r1 or r2
+    if type(v) == "number" and v ~= CFG[key] then CFG[key] = v; save_cfg() end
+end
+
+local function set(key, val)
+    if CFG[key] ~= val then CFG[key] = val; save_cfg() end
+end
+
+-- ─────────────────────────────────────────────
+-- MENU DRAW
+-- ─────────────────────────────────────────────
+
+local function draw_ui()
+    detect_convention()
+    pcall(IG.text, "Auto Bhop  (LLAC-safe)")
+    pcall(IG.sep)
+
+    set("enabled", toggle("enabled", "Enabled"))
+    set("debug",   toggle("debug",   "Debug in console"))
+
+    pcall(IG.space)
+    slider_int("miss_chance", "Miss chance (%)", 0, 40)
+    slider_int("max_streak",  "Max consecutive hops before forced miss", 1, 20)
+
+    pcall(IG.space)
+    pcall(IG.sep)
+    local total = state.hops + state.misses
+    local pct   = total > 0 and string.format("%.0f%%", state.hops / total * 100) or "n/a"
+    pcall(IG.text, string.format("Hops: %d   Misses: %d   Success rate: %s", state.hops, state.misses, pct))
+    pcall(IG.text, "Hold SPACE to bhop. Timing is randomised to look human.")
+end
+
+-- ─────────────────────────────────────────────
+-- TAB REGISTRATION (probed, same as edge_jumps)
+-- ─────────────────────────────────────────────
+
+local tab_ok = false
+pcall(function()
+    local args = { "Bhop" }
+    for _ = 1, 6 do
+        local ok, err = pcall(menu.add_main_tab, unpack_(args))
+        if ok then tab_ok = true; return end
+        local n, want = tostring(err):match("bad argument #(%d+) to '[^']*' %((%a+) expected")
+        n = tonumber(n)
+        if not n or n ~= #args + 1 then return end
+        if     want == "string"   then args[n] = "Bhop"
+        elseif want == "function" then args[n] = draw_ui
+        elseif want == "number"   then args[n] = 0
+        elseif want == "boolean"  then args[n] = true
+        else return end
+    end
+end)
+
+if not tab_ok then
+    local prev_paint = on_paint
+    function on_paint()
+        if prev_paint then pcall(prev_paint) end
+        if _G.echidna_bhop_instance ~= me then return end
+        local open = false
+        pcall(function() open = menu.is_open() end)
+        if not open then return end
+        if pcall(IG.begin_w, "Bhop##echidna_bhop") then pcall(draw_ui) end
+        pcall(IG.finish)
+    end
+end
+
+log("loaded")

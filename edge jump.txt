@@ -1,0 +1,594 @@
+local CFG = {
+    enabled   = true,
+    no_crouch = false,
+    debug     = true,
+    min_speed = 15,
+    key       = 0,
+    key_src   = "in",
+}
+
+local PL      = "CTerrorPlayer"
+local IN_JUMP = IN_JUMP or 2
+local IN_DUCK = IN_DUCK or 4
+local LADDER  = 9
+local floor, sqrt = math.floor, math.sqrt
+local clock = (os and os.clock) or function() return GlobalVars.curtime() end
+
+local IPT = 1 / 30
+pcall(function() local v = GlobalVars.interval_per_tick(); if type(v) == "number" and v > 0 then IPT = v end end)
+
+local function say(s) pcall(client.print, "[edgejump] " .. s) end
+local function has_bit(v, b) return floor(v / b) % 2 == 1 end
+local function V(x, y, z) return { x = x, y = y, z = z } end
+
+local function on_ground(lp)
+    local g
+    pcall(function() g = lp:is_on_ground() end)
+    if g == nil then pcall(function() g = has_bit(lp:get_flags(), 1) end) end
+    return g == true
+end
+
+local MASK = 0x1400B
+local use_mask = true
+local function hit(a, b)
+    local ok, r
+    if use_mask then ok, r = pcall(EngineTrace.TraceRay, a, b, MASK)
+    else ok, r = pcall(EngineTrace.TraceRay, a, b) end
+    if not ok or type(r) ~= "table" then return nil, r end
+    if r.did_hit ~= nil then return r.did_hit == true, r end
+    if type(r.fraction) == "number" then return r.fraction < 0.999, r end
+    return nil, r
+end
+
+local STEP = 18
+local SKIP = { "Weapon", "Pistol", "Rifle", "Shotgun", "SMG", "Sniper", "Submachine", "Grenade", "Chainsaw",
+               "Melee", "FirstAid", "Pills", "Adrenaline", "Defib", "PipeBomb", "Molotov", "VomitJar", "Upgrade",
+               "GasCan", "Player", "Bot", "Infected", "Tank", "Boomer", "Hunter", "Smoker", "Jockey", "Spitter",
+               "Charger", "Witch", "Ragdoll", "Projectile" }
+
+local function hit_class(r)
+    local e, c = r.entity, nil
+    if e == nil then return nil end
+    pcall(function()
+        if type(e) == "number" then e = ClientEntityList.GetClientEntity(e) end
+        c = e:get_class_name()
+    end)
+    return c
+end
+
+local function skip_class(cls)
+    if not cls then return false end
+    for _, w in ipairs(SKIP) do
+        if cls:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+local function ground_under(x, y, z, inner)
+    for _, up in ipairs({ 4, 12, 24 }) do
+        local top = z + up
+        local h, r = hit(V(x, y, top), V(x, y, z - STEP - 1))
+        if h == nil then return nil end
+        if r.startsolid ~= true then
+            if not h then return false, "nothing" end
+            local hz
+            if type(r.endpos) == "table" and type(r.endpos.z) == "number" then hz = r.endpos.z
+            elseif type(r.fraction) == "number" then hz = top + (z - STEP - 1 - top) * r.fraction end
+            local drop = hz and (z - hz) or 0
+            local nz = type(r.plane_normal) == "table" and r.plane_normal.z or nil
+            local cls = hit_class(r)
+            local info = string.format("%.0f down, slope %s, %s", drop, nz and string.format("%.2f", nz) or "?", tostring(cls or "world"))
+            if drop < -4 then
+                if inner and drop >= -STEP and (type(nz) ~= "number" or nz >= 0.7) and not skip_class(cls) then return true, info, drop end
+                return "solid", info
+            end
+            if drop > STEP + 0.25 then return false, info end
+            if type(nz) == "number" and nz < 0.7 then return false, info end
+            if skip_class(cls) then return false, info end
+            return true, info, drop
+        end
+    end
+    return "solid", "inside something"
+end
+
+local CORNERS = { { 0, 0 }, { 8, 0 }, { -8, 0 }, { 0, 8 }, { 0, -8 }, { 8, 8 }, { 8, -8 }, { -8, 8 }, { -8, -8 },
+                  { 16, 16 }, { 16, -16 }, { -16, 16 }, { -16, -16 }, { 16, 0 }, { -16, 0 }, { 0, 16 }, { 0, -16 } }
+
+local function thin_floor(x, y, z, need_low)
+    for _, dz in ipairs({ 1, 8 }) do
+        for _, o in ipairs({ -12, -6, 0, 6, 12 }) do
+            for _, d in ipairs({ { V(x - 14, y + o, z - dz), V(x + 14, y + o, z - dz) },
+                                 { V(x + o, y - 14, z - dz), V(x + o, y + 14, z - dz) } }) do
+                local h, r = hit(d[1], d[2])
+                if h == nil then return nil end
+                if (h or r.startsolid == true) and not skip_class(hit_class(r)) then
+                    local px, py = d[1].x, d[1].y
+                    if r.startsolid ~= true and type(r.endpos) == "table" and type(r.endpos.x) == "number" then
+                        local ux, uy = d[2].x - d[1].x, d[2].y - d[1].y
+                        local l = sqrt(ux * ux + uy * uy)
+                        px, py = r.endpos.x + ux / l * 0.5, r.endpos.y + uy / l * 0.5
+                    end
+                    local g, info, drop = ground_under(px, py, z, true)
+                    if g == true and (not need_low or drop >= -1.5) then return true, "thin floor: " .. info end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function floor_at(x, y, z, need_low)
+    local unknown, seen_open, raised = false, false, nil
+    for _, c in ipairs(CORNERS) do
+        local inner = c[1] >= -8 and c[1] <= 8 and c[2] >= -8 and c[2] <= 8
+        local g, info, drop = ground_under(x + c[1], y + c[2], z, inner)
+        local where = string.format("(%+d,%+d) %s", c[1], c[2], info or "")
+        if g == true and need_low and drop < -1.5 then
+            raised = raised or where
+            g = false
+        end
+        if g == true then return true, where end
+        if g == nil then unknown = true elseif g == false then seen_open = true end
+    end
+    if unknown or not seen_open then return nil end
+    local t, info = thin_floor(x, y, z, need_low)
+    if t == true then return true, info end
+    if t == nil then return nil end
+    return false, raised and ("only a raised surface ahead " .. raised) or nil
+end
+
+local check = { ok = nil, tested_at = -99, fails = 0 }
+local function selftest(lp)
+    if check.ok ~= nil or clock() - check.tested_at < 1 then return end
+    check.tested_at = clock()
+    local o, e
+    pcall(function() o = lp:get_origin(); e = lp:EyePosition() end)
+    if not o or not e or not on_ground(lp) then return end
+    local down, r = hit(V(o.x, o.y, o.z + 4), V(o.x, o.y, o.z - STEP - 1))
+    if use_mask and (down == nil or (type(r) == "table" and r.startsolid == true)) then
+        use_mask = false
+        down, r = hit(V(o.x, o.y, o.z + 4), V(o.x, o.y, o.z - STEP - 1))
+    end
+    local up = hit(V(e.x, e.y, e.z), V(e.x, e.y, e.z + 8))
+    local inside = type(r) == "table" and r.startsolid == true
+    if down == nil or inside then
+        check.fails = check.fails + 1
+        if check.fails >= 3 then check.ok = false; say("TraceRay not usable here (" .. tostring(r) .. ") - edge jump is off") end
+    elseif down and up == false then
+        check.ok = true
+        if CFG.debug then say("ground check working (TraceRay" .. (use_mask and ", sees player clip)" or ", no player clip)")) end
+    end
+end
+
+local function allowed(cmd, lp)
+    local ok = true
+    pcall(function()
+        if not lp:is_alive() or lp:is_incapacitated() then ok = false; return end
+        if lp.is_hanging_from_ledge and lp:is_hanging_from_ledge() then ok = false; return end
+        if lp:get_prop_int(PL, "movetype") == LADDER then ok = false end
+    end)
+    if not ok then return false end
+    local b = cmd:get_buttons() or 0
+    if has_bit(b, IN_JUMP) then return false end
+    if CFG.no_crouch and has_bit(b, IN_DUCK) then return false end
+    local v = lp:get_velocity()
+    return v ~= nil and sqrt(v.x * v.x + v.y * v.y) >= CFG.min_speed
+end
+
+local jumps = 0
+local ring, was_ground, jumped_last, prev_here = {}, false, false, nil
+
+local function note(lp, ok_now, here, nxt, seen)
+    local o, v = lp:get_origin(), lp:get_velocity()
+    ring[#ring + 1] = string.format("pos %.0f %.0f %.0f  speed %.0f  allowed %s  floor here %s  next %s%s",
+        o.x, o.y, o.z, sqrt(v.x * v.x + v.y * v.y), ok_now and "yes" or "no", tostring(here), tostring(nxt),
+        seen and ("  [" .. seen .. "]") or "")
+    if #ring > 8 then table.remove(ring, 1) end
+end
+
+local function tick(cmd, lp)
+    local g = on_ground(lp)
+    if CFG.debug and was_ground and not g and not jumped_last and #ring > 0 then
+        say("went off an edge without an edge jump - last ticks:")
+        for _, l in ipairs(ring) do say("  " .. l) end
+    end
+    was_ground = g
+    local b = cmd:get_buttons() or 0
+    jumped_last = has_bit(b, IN_JUMP)
+    if not g then ring = {}; prev_here = nil; return end
+
+    selftest(lp)
+    local ok_now = check.ok == true and allowed(cmd, lp)
+    local here, nxt, seen = "-", "-", nil
+    if ok_now then
+        local o, v = lp:get_origin(), lp:get_velocity()
+        here = floor_at(o.x, o.y, o.z)
+        local why
+        if here == true then
+            nxt, seen = floor_at(o.x + v.x * IPT, o.y + v.y * IPT, o.z, true)
+            if nxt == false then why = seen and ("floor ends next tick, " .. seen) or "floor ends next tick" end
+        end
+        if why then
+            cmd:set_buttons(b + IN_JUMP)
+            jumped_last = true
+            jumps = jumps + 1
+            if CFG.debug then say(string.format("edge jump #%d (%s) at %.0f %.0f %.0f", jumps, why, o.x, o.y, o.z)) end
+        end
+    end
+    prev_here = (here == true or here == false) and here or nil
+    pcall(note, lp, ok_now, here, nxt, seen)
+end
+
+local IG = {
+    button   = imgui.Button or imgui.button,
+    checkbox = imgui.Checkbox or imgui.checkbox,
+    text     = imgui.Text or imgui.text,
+    sint     = imgui.SliderInt or imgui.slider_int,
+    sfloat   = imgui.SliderFloat or imgui.slider_float,
+    begin    = imgui.Begin or imgui.begin_window or imgui.begin,
+    finish   = imgui.End or imgui.end_window,
+    key      = imgui.is_key_down or imgui.IsKeyDown,
+    mouse    = imgui.is_mouse_down or imgui.IsMouseDown,
+}
+
+local VKNAME = { [1] = "MOUSE1", [2] = "MOUSE2", [4] = "MOUSE3", [5] = "MOUSE4", [6] = "MOUSE5",
+    [8] = "BACKSPACE", [9] = "TAB", [13] = "ENTER", [16] = "SHIFT", [17] = "CTRL", [18] = "ALT",
+    [20] = "CAPSLOCK", [27] = "ESC", [32] = "SPACE", [160] = "LSHIFT", [161] = "RSHIFT",
+    [162] = "LCTRL", [163] = "RCTRL", [164] = "LALT", [165] = "RALT" }
+for i = 0, 9 do VKNAME[48 + i] = tostring(i) end
+for i = 0, 25 do VKNAME[65 + i] = string.char(65 + i) end
+for i = 1, 12 do VKNAME[111 + i] = "F" .. i end
+local MOUSE_VK = { [0] = 1, [1] = 2, [2] = 4, [3] = 5, [4] = 6 }
+
+local K = type(keys) == "table" and keys or {}
+local KNAME = {}
+pcall(function() for n, c in pairs(K) do if type(c) == "number" and not KNAME[c] then KNAME[c] = tostring(n):gsub("^KEY_", "") end end end)
+
+local function is_true(d) return d == true or (type(d) == "number" and d ~= 0) end
+
+local function in_down(code)
+    local d
+    local ok = pcall(function() d = input.is_key_down(code) end)
+    if not ok or d == nil then pcall(function() d = input.is_key_pressed(code) end) end
+    return is_true(d)
+end
+local function ig_down(code)
+    local d
+    if IG.key then pcall(function() d = IG.key(code) end) end
+    return is_true(d)
+end
+local function im_down(i)
+    local d
+    if IG.mouse then pcall(function() d = IG.mouse(i) end) end
+    return is_true(d)
+end
+
+local function key_name(code, src)
+    if not code or code == 0 then return "none" end
+    if src == "im" then return "MOUSE" .. (code + 1) end
+    if src == "in" and KNAME[code] then return KNAME[code] end
+    return VKNAME[code] or ("key " .. tostring(code))
+end
+
+local function key_from_name(w)
+    w = w:upper():gsub("^M(%d)$", "MOUSE%1")
+    for c, n in pairs(KNAME) do if n:upper() == w then return c, "in" end end
+    for c, n in pairs(VKNAME) do if n == w then return c, "vk" end end
+end
+
+local ig_held = false
+local function held_now()
+    local c, src = CFG.key, CFG.key_src
+    if c == 0 then return true end
+    if src == "im" then
+        return ig_held or in_down(MOUSE_VK[c] or -1) or (K["MOUSE" .. (c + 1)] and in_down(K["MOUSE" .. (c + 1)])) or false
+    elseif src == "ig" or src == "vk" then
+        local n = VKNAME[c]
+        return ig_held or in_down(c) or (n and K[n] and in_down(K[n])) or (n and K["KEY_" .. n] and in_down(K["KEY_" .. n])) or false
+    end
+    return in_down(c)
+end
+local function sample_imgui()
+    local c, src = CFG.key, CFG.key_src
+    if c == 0 then ig_held = false
+    elseif src == "im" then ig_held = im_down(c)
+    elseif src == "ig" or src == "vk" then ig_held = ig_down(c)
+    else ig_held = false end
+end
+
+local function key_active()
+    return held_now()
+end
+
+local PRED = { mode = nil, moved = 0, same = 0, seq = 0, snaps = {}, cm_calls = 0, pred_calls = 0, ring = {}, jumps = 0, misses = 0 }
+
+local function snapshot(lp)
+    local s
+    pcall(function()
+        local o, v = lp:get_origin(), lp:get_velocity()
+        s = { x = o.x, y = o.y, z = o.z, vz = v.z or 0, speed = sqrt(v.x * v.x + v.y * v.y), ground = on_ground(lp) }
+    end)
+    return s
+end
+
+local function decide(cmd, lp, n, hook)
+    local e = PRED.snaps[n]
+    if not e or not e.cm or not e.pred then return end
+    local first, second = e.cm, e.pred
+    local second_hook = "pred"
+    if e.cm.seq > e.pred.seq then first, second, second_hook = e.pred, e.cm, "cm" end
+    if hook ~= second_hook then return end
+    if PRED.mode == nil then
+        if first.ground and second.ground and first.speed > 60 then
+            local dx, dy = second.x - first.x, second.y - first.y
+            local dist, want = sqrt(dx * dx + dy * dy), first.speed * IPT
+            if dist > want * 0.5 then PRED.moved = PRED.moved + 1
+            elseif dist < want * 0.1 then PRED.same = PRED.same + 1 end
+            if PRED.moved >= 8 then
+                PRED.mode = "prediction"
+                say("using the game's own movement prediction (exact)")
+            elseif PRED.same >= 8 then
+                PRED.mode = "traces"
+                say("game prediction not usable here - using floor traces")
+            end
+        end
+        return
+    end
+    if PRED.mode ~= "prediction" then return end
+    local falling = (not second.ground) or second.vz < -5 or second.z < first.z - 19
+    PRED.ring[#PRED.ring + 1] = string.format("before: ground %s z %.1f | after game move: ground %s z %.1f vz %.1f moved %.1f",
+        tostring(first.ground), first.z, tostring(second.ground), second.z, second.vz,
+        sqrt((second.x - first.x) ^ 2 + (second.y - first.y) ^ 2))
+    if #PRED.ring > 4 then table.remove(PRED.ring, 1) end
+    if first.ground and first.vz > -5 and falling and allowed(cmd, lp) then
+        local b = cmd:get_buttons() or 0
+        if not has_bit(b, IN_JUMP) then
+            cmd:set_buttons(b + IN_JUMP)
+            jumped_last = true
+            jumps = jumps + 1
+            PRED.jumps = PRED.jumps + 1
+            if CFG.debug then say(string.format("edge jump #%d (game says you leave the ground this tick) at %.0f %.0f %.0f", jumps, first.x, first.y, first.z)) end
+        end
+    end
+end
+
+local function record(cmd, lp, hook)
+    local n
+    pcall(function() n = cmd:get_command_number() end)
+    if type(n) ~= "number" then return end
+    local s = snapshot(lp)
+    if not s then return end
+    PRED.seq = PRED.seq + 1
+    s.seq = PRED.seq
+    local e = PRED.snaps[n] or {}
+    e[hook] = s
+    PRED.snaps[n] = e
+    PRED.snaps[n - 10] = nil
+    decide(cmd, lp, n, hook)
+end
+
+local function watch_miss(cmd, lp)
+    local g = on_ground(lp)
+    if was_ground and not g and not jumped_last then
+        if CFG.debug then
+            say(string.format("went off an edge without an edge jump (%s)", PRED.mode == "prediction" and "game prediction" or "traces"))
+            for _, l in ipairs(PRED.ring) do say("  " .. l) end
+        end
+        if PRED.mode == "prediction" then
+            PRED.misses = PRED.misses + 1
+            if PRED.jumps == 0 and PRED.misses >= 2 then
+                PRED.mode = "traces"
+                say("game prediction isn't catching edges here - switched to floor traces")
+            end
+        end
+    end
+    was_ground = g
+    local b = cmd:get_buttons() or 0
+    jumped_last = has_bit(b, IN_JUMP)
+    ring = {}
+end
+
+local me = {}
+_G.echidna_edgejump_instance = me
+local function active(cmd, lp)
+    if _G.echidna_edgejump_instance ~= me or not CFG.enabled or not cmd or not lp then return false end
+    if not key_active() then was_ground = false; ring = {}; prev_here = nil; return false end
+    return true
+end
+
+local prev = on_create_move
+function on_create_move(cmd, lp)
+    if prev then pcall(prev, cmd, lp) end
+    if not active(cmd, lp) then return end
+    PRED.cm_calls = PRED.cm_calls + 1
+    if PRED.mode == nil and PRED.pred_calls == 0 and PRED.cm_calls > 300 then
+        PRED.mode = "traces"
+        say("game prediction hook not called - using floor traces")
+    end
+    if PRED.mode == "prediction" then
+        pcall(watch_miss, cmd, lp)
+        pcall(record, cmd, lp, "cm")
+    else
+        pcall(record, cmd, lp, "cm")
+        pcall(tick, cmd, lp)
+    end
+end
+
+local prev_pred = on_create_move_prediction
+function on_create_move_prediction(cmd, lp)
+    if prev_pred then pcall(prev_pred, cmd, lp) end
+    lp = lp or (EntityCache and EntityCache.GetLocal and EntityCache.GetLocal())
+    if not active(cmd, lp) then return end
+    PRED.pred_calls = PRED.pred_calls + 1
+    if PRED.mode == "traces" then return end
+    pcall(record, cmd, lp, "pred")
+end
+
+local CFG_FILE = "echidna_edgejump.cfg"
+local function save_cfg()
+    pcall(function()
+        local f = io.open(CFG_FILE, "w")
+        for k, v in pairs(CFG) do f:write(k, "=", tostring(v), "\n") end
+        f:close()
+    end)
+end
+pcall(function()
+    local f = io.open(CFG_FILE, "r")
+    if not f then return end
+    for line in f:lines() do
+        local k, v = line:match("^([%w_]+)=(.+)$")
+        if k and CFG[k] ~= nil then
+            if v == "true" then CFG[k] = true elseif v == "false" then CFG[k] = false
+            elseif type(CFG[k]) == "string" then CFG[k] = v
+            else CFG[k] = tonumber(v) or CFG[k] end
+        end
+    end
+    f:close()
+end)
+
+local W = { value_first = nil, broken = false, last_flip = {} }
+local function detect()
+    if W.value_first ~= nil or W.broken then return end
+    for _, fn in ipairs({ IG.sint, IG.sfloat }) do
+        local ok, r1, r2 = pcall(fn, "##ej_detect", 0, 0, 1)
+        if ok and type(r1) == "number" then W.value_first = true; return end
+        if ok and type(r2) == "number" then W.value_first = false; return end
+    end
+    W.broken = true
+end
+local function toggle(key, label)
+    local cur = CFG[key] and true or false
+    if W.broken or W.value_first == nil then
+        local ok, r = pcall(IG.button, (cur and "[ON]  " or "[off] ") .. label .. "##ej_" .. key)
+        if ok and r == true then return not cur end
+        return cur
+    end
+    local ok, r1, r2 = pcall(IG.checkbox, label .. "##ej_" .. key, cur)
+    if not ok then W.broken = true; return cur end
+    local new
+    if r2 == nil then
+        if W.value_first then new = r1 else new = (r1 == true) and not cur or cur end
+    elseif W.value_first then new = r1 else new = r2 end
+    if type(new) ~= "boolean" then W.broken = true; return cur end
+    if new ~= cur then
+        local t = clock()
+        if W.last_flip[key] and t - W.last_flip[key] < 0.05 then W.broken = true; return cur end
+        W.last_flip[key] = t
+    end
+    return new
+end
+local function set(key, val) if CFG[key] ~= val then CFG[key] = val; save_cfg() end end
+
+local bind = { on = false, prev = {}, started = 0, warned = false }
+local function scan()
+    local now = {}
+    for c = 1, 254 do
+        if in_down(c) then now["in" .. c] = true end
+        if ig_down(c) then now["ig" .. c] = true end
+    end
+    for i = 0, 4 do if im_down(i) then now["im" .. i] = true end end
+    return now
+end
+local function bind_ui()
+    local label = bind.on and "Press a key or mouse button...  (ESC = no key)" or ("Hold key: " .. key_name(CFG.key, CFG.key_src))
+    local ok, r = pcall(IG.button, label .. "##ej_bind")
+    if ok and r == true and not bind.on then
+        bind.on, bind.prev, bind.started, bind.warned = true, scan(), clock(), false
+        return
+    end
+    if not bind.on then return end
+    local now = scan()
+    local pick
+    for _, src in ipairs({ "in", "ig", "im" }) do
+        for k in pairs(now) do
+            if not bind.prev[k] and k:sub(1, 2) == src then
+                local c = tonumber(k:sub(3))
+                if not pick or c < pick[2] then pick = { src, c } end
+            end
+        end
+        if pick then break end
+    end
+    bind.prev = now
+    if pick then
+        bind.on = false
+        local src, c = pick[1], pick[2]
+        local nm = key_name(c, src)
+        local esc = nm == "ESC" or nm == "ESCAPE"
+        if esc then
+            CFG.key = 0; save_cfg(); say("key cleared - edge jump is always on")
+        else
+            CFG.key_src = src; CFG.key = c; save_cfg()
+            say("hold " .. key_name(c, src) .. " to use edge jump")
+        end
+        return
+    end
+    if not bind.warned and clock() - bind.started > 6 then
+        bind.warned = true
+        say("no key press seen yet - you can also type in console: edgejump_key mouse5 (or shift, f, m4, none)")
+    end
+end
+
+local function draw_ui()
+    set("enabled", toggle("enabled", "Jump when walking off an edge"))
+    bind_ui()
+    pcall(IG.text, CFG.key == 0 and "no key set - always on" or ("only works while holding " .. key_name(CFG.key, CFG.key_src) .. (key_active() and "   (held)" or "")))
+    set("no_crouch", toggle("no_crouch", "Not while crouching (crouch to drop down)"))
+    set("debug", toggle("debug", "Debug messages in the console"))
+    detect()
+    local s
+    if PRED.mode == "prediction" then s = "game prediction (exact)"
+    else s = check.ok == true and "floor traces" or (check.ok == false and "not available" or "testing") end
+    pcall(IG.text, string.format("ground check: %s   edge jumps: %d", s, jumps))
+end
+
+local tab_ok = false
+pcall(function()
+    local args = { "Edge Jump" }
+    local unpack_ = unpack or table.unpack
+    for _ = 1, 6 do
+        local ok, err = pcall(menu.add_main_tab, unpack_(args))
+        if ok then tab_ok = true; return end
+        local n, want = tostring(err):match("bad argument #(%d+) to '[^']*' %((%a+) expected")
+        n = tonumber(n)
+        if not n or n ~= #args + 1 then return end
+        if want == "string" then args[n] = "Edge Jump"
+        elseif want == "function" then args[n] = draw_ui
+        elseif want == "number" then args[n] = 0
+        elseif want == "boolean" then args[n] = true
+        else return end
+    end
+end)
+if not tab_ok then
+    local prev_paint = on_paint
+    function on_paint()
+        if prev_paint then pcall(prev_paint) end
+        local open = false
+        pcall(function() open = menu.is_open() end)
+        if not open then return end
+        if pcall(IG.begin, "Edge Jump##echidna_edgejump") then pcall(draw_ui) end
+        pcall(IG.finish)
+    end
+end
+
+local prev_es = on_end_scene
+function on_end_scene(...)
+    if prev_es then pcall(prev_es, ...) end
+    if _G.echidna_edgejump_instance ~= me then return end
+    pcall(sample_imgui)
+end
+
+pcall(function()
+    local ok = client.register_command("edgejump_key", function(arg)
+        local w = tostring(arg or ""):match("%S+")
+        if not w then say("hold key: " .. key_name(CFG.key, CFG.key_src) .. "   (edgejump_key mouse5 / shift / f / none)"); return end
+        local u = w:upper()
+        if u == "NONE" or u == "OFF" then CFG.key = 0; save_cfg(); say("no key - always on"); return end
+        local c, src = key_from_name(u)
+        if not c then say("unknown key '" .. w .. "'"); return end
+        CFG.key, CFG.key_src = c, src; save_cfg()
+        say("hold " .. key_name(c, src) .. " to use edge jump")
+    end)
+    if ok == false then say("couldn't register command edgejump_key") end
+end)
+
+say("loaded")
