@@ -1,0 +1,287 @@
+
+===== FILE: autocut tounge.txt (PARTE 1/3) =====
+local NAME = "autocut"
+local CFG_FILE = "echidna_autocut.cfg"
+local CALIB_FILE = "echidna_autocut_calib.txt"
+local PT_GUARD = "echidna_autocut_pt_guard.txt"
+local PT_GUARD_FULL = "echidna_autocut_pt_guard_full.txt"
+
+local CFG = { enabled = true, switch = true, switch_back = false, wall = true, debug = false }
+
+local LEAD, TILT, PRESWAP, BACKOFF, AIM_TOL, GRACE = 0.15, 25, 0.1, 3, 10, 0.35
+
+local sqrt, abs, max, min, floor = math.sqrt, math.abs, math.max, math.min, math.floor
+local atan2 = math.atan2 or math.atan
+local deg, rad = math.deg, math.rad
+
+local PL = "CTerrorPlayer"
+local IN_ATTACK = IN_ATTACK or 1
+local GROUP_SV = GROUP_PLAYER_SURVIVOR or 1
+local ZC_SMOKER = 1
+local MELEE_CLASS = "CTerrorMeleeWeapon"
+
+local function log(s) pcall(client.print, "[" .. NAME .. "] " .. tostring(s)) end
+local function dbg(s) if CFG.debug then log(s) end end
+local function V(x, y, z) return { x = x, y = y, z = z } end
+local function dist(a, b) local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z; return sqrt(dx * dx + dy * dy + dz * dz) end
+local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi end return v end
+local function has_bit(v, b) return floor(v / b) % 2 == 1 end
+local function angles_to(from, to)
+    local dx, dy, dz = to.x - from.x, to.y - from.y, to.z - from.z
+    return deg(atan2(-dz, sqrt(dx * dx + dy * dy))), deg(atan2(dy, dx))
+end
+local function median(t)
+    local c = {}
+    for i = 1, #t do c[i] = t[i] end
+    table.sort(c)
+    local n = #c
+    if n == 0 then return nil end
+    return (n % 2 == 1) and c[(n + 1) / 2] or (c[n / 2] + c[n / 2 + 1]) / 2
+end
+
+local maxc = 32
+local function handle_index(h)
+    if type(h) ~= "number" or h < 0 then return nil end
+    local i = h % 2048
+    if i < 1 or i >= 2047 then return nil end
+    return i
+end
+local function player_handle(h)
+    local i = handle_index(h)
+    if i and i <= maxc then return i end
+    return nil
+end
+
+local function cvar(name, fallback)
+    local v
+    pcall(function() v = Cvars.FindVar(name):GetFloat() end)
+    if type(v) ~= "number" or v <= 0 then return fallback end
+    return v
+end
+
+local IPT = 1 / 30
+pcall(function() local v = GlobalVars.interval_per_tick(); if type(v) == "number" and v > 0 then IPT = v end end)
+
+local function server_now(lp)
+    local tb
+    pcall(function() tb = lp:get_prop_int(PL, "m_nTickBase") end)
+    if type(tb) ~= "number" then return nil end
+    return tb * IPT
+end
+
+local set_style = nil
+local function set_angles(cmd, ang)
+    if set_style ~= 2 and pcall(function() cmd:set_viewangles(ang) end) then set_style = 1; return true end
+    if set_style ~= 1 and pcall(function() cmd:set_viewangles(ang.x, ang.y, ang.z) end) then set_style = 2; return true end
+    return false
+end
+
+local function keep_movement(cmd, old_yaw, new_yaw)
+    pcall(function()
+        local fm, sm = cmd:get_forwardmove(), cmd:get_sidemove()
+        local r = rad(new_yaw - old_yaw)
+        local c, s = math.cos(r), math.sin(r)
+        cmd:set_forwardmove(fm * c - sm * s)
+        cmd:set_sidemove(fm * s + sm * c)
+    end)
+end
+
+local function all_infected()
+    local out, have = {}, {}
+    local function add(list, need_team)
+        if type(list) ~= "table" then return end
+        for _, p in ipairs(list) do
+            local ok, idx = pcall(function() return p:entindex() end)
+            if ok and idx and not have[idx] then
+                local keep = true
+                if need_team then
+                    local okt, tm = pcall(function() return p:get_team() end)
+                    keep = okt and tm == 3
+                end
+                if keep then have[idx] = true; out[#out + 1] = p end
+            end
+        end
+    end
+    pcall(function() add(EntityCache.GetGroup(GROUP_SPECIAL_INFECTED or 4), false) end)
+    pcall(function() add(EntityCache.GetGroup(GROUP_PLAYER_INFECTED or 2), true) end)
+    pcall(function() add(EntityCache.GetGroup(GROUP_PLAYER_ALL or 0), true) end)
+    return out
+end
+
+local function save_cfg()
+    pcall(function()
+        local f = io.open(CFG_FILE, "w")
+        for k, v in pairs(CFG) do f:write(k, "=", tostring(v), "\n") end
+        f:close()
+    end)
+end
+pcall(function()
+    local f = io.open(CFG_FILE, "r")
+    if not f then return end
+    for line in f:lines() do
+        local k, v = line:match("^([%w_]+)=(.+)$")
+        if k and CFG[k] ~= nil then CFG[k] = (v == "true") end
+    end
+    f:close()
+end)
+
+local function read_file(file)
+    local c = ""
+    pcall(function() local f = io.open(file, "r"); if f then c = f:read("*a") or ""; f:close() end end)
+    return c
+end
+local function write_file(file, txt)
+    pcall(function() local f = io.open(file, "w"); if f then f:write(txt); f:close() end end)
+end
+local function crashed_last_time(file)
+    local c = read_file(file)
+    return c:find("TRY", 1, true) and not c:find("OK", 1, true)
+end
+
+local PT_MASK = 0x1000B
+local pt = { ok = nil, calls = 0, crashed = crashed_last_time(PT_GUARD),
+             full_ok = nil, full_calls = 0, full_crashed = crashed_last_time(PT_GUARD_FULL) }
+local function bits_solid(r)
+    r = floor(r)
+    for _, b in ipairs({ 0x1, 0x2, 0x8, 0x10000 }) do
+        if has_bit(r, b) then return true end
+    end
+    return false
+end
+local function ask(name, x, y, z)
+    return pcall(function() return EngineTrace[name](V(x, y, z), PT_MASK) end)
+end
+local function solid_at(x, y, z)
+    if pt.full_ok ~= false and not pt.full_crashed then
+        local first = pt.full_calls == 0
+        if first then write_file(PT_GUARD_FULL, "TRY\n") end
+        local ok, r = ask("GetPointContents", x, y, z)
+        if first then write_file(PT_GUARD_FULL, "TRY\nOK\n") end
+        pt.full_calls = pt.full_calls + 1
+        if ok and type(r) == "number" then pt.full_ok = true; return bits_solid(r) end
+        if pt.full_calls >= 3 and not pt.full_ok then pt.full_ok = false end
+    end
+    if pt.crashed or pt.ok == false then return nil end
+    local first = pt.calls == 0
+    if first then write_file(PT_GUARD, "TRY\n") end
+    local ok, r = ask("GetPointContents_WorldOnly", x, y, z)
+    if first then write_file(PT_GUARD, "TRY\nOK\n") end
+    pt.calls = pt.calls + 1
+    if not ok or type(r) ~= "number" then
+        if pt.calls >= 3 and not pt.ok then pt.ok = false end
+        return nil
+    end
+    pt.ok = true
+    return bits_solid(r)
+end
+
+local srv = { next = 0, speed = 1000, range = 750 }
+local function refresh(now)
+    if now < srv.next then return end
+    srv.next = now + 5
+    srv.speed = cvar("tongue_fly_speed", 1000)
+    srv.range = cvar("tongue_range", 750)
+    pcall(function()
+        local m = EngineClient.GetMaxClients()
+        if type(m) == "number" and m > 0 and m < 64 then maxc = m end
+    end)
+end
+
+local corr = {}
+local function save_calib()
+    pcall(function()
+        local f = io.open(CALIB_FILE, "w")
+        for _, c in ipairs(corr) do f:write(string.format("%.4f\n", c)) end
+        f:close()
+    end)
+end
+pcall(function()
+    local f = io.open(CALIB_FILE, "r")
+    if not f then return end
+    for line in f:lines() do local v = tonumber(line); if v then corr[#corr + 1] = v end end
+    f:close()
+end)
+local function correction() return median(corr) or 0 end
+
+local fire_pending = false
+local tongue = nil
+local stats = { cuts = 0, dragged = 0, last = "-" }
+local last_owner = nil
+local swapped_by_us, switch_back_at, post_cut_release = false, nil, false
+local was_melee, melee_since, cur_cls = false, nil, "unknown"
+local override_until, smoker_block, smoker_miss = 0, {}, {}
+local preswap_seen, aim_since = -99, nil
+local last_swap_cmd = -99
+local preswap_block_until, ignore_back_until = 0, 0
+local wall_cache = {}
+
+local function weapon_class(lp)
+    local cls
+    pcall(function()
+        local idx = handle_index(lp:get_prop_int(PL, "m_hActiveWeapon"))
+        if idx then cls = ClientEntityList.GetClientEntity(idx):get_class_name() end
+    end)
+    return cls
+end
+local function melee_out(lp)
+    local cls = weapon_class(lp)
+    if cls == nil then return true, "unknown" end
+    return cls == MELEE_CLASS, cls
+end
+
+local function swap_to_melee(now)
+    if now - last_swap_cmd < 0.4 then return end
+    last_swap_cmd = now
+    pcall(function() EngineClient.ClientCmd("use weapon_melee") end)
+    swapped_by_us = true
+end
+local function swap_back(now)
+    last_swap_cmd = now
+    ignore_back_until = now + 1.0
+    pcall(function() EngineClient.ClientCmd("lastinv") end)
+end
+
+local function track_weapon(lp, now)
+    local _, cls = melee_out(lp)
+    cur_cls = cls
+    local is_melee = (cls == MELEE_CLASS)
+    if cls ~= "unknown" then
+        if is_melee and not was_melee then melee_since = now end
+        if swapped_by_us and was_melee and not is_melee and melee_since and now - melee_since > 0.15 then
+            override_until = now + 2.0
+            if tongue then tongue.override = true end
+            swapped_by_us = false; switch_back_at = nil
+        elseif is_melee and tongue and tongue.override and now >= override_until then
+            tongue.override = false
+        end
+        if was_melee and not is_melee and now > ignore_back_until then
+            preswap_block_until = max(preswap_block_until, now + 2.0)
+        end
+        if not is_melee then melee_since = nil end
+        was_melee = is_melee
+    end
+    return is_melee
+end
+
+local function aim_error(s_eye, s_ang, target)
+    local p, y = rad(s_ang.x), rad(s_ang.y)
+    local fx, fy, fz = math.cos(p) * math.cos(y), math.cos(p) * math.sin(y), -math.sin(p)
+    local dx, dy, dz = target.x - s_eye.x, target.y - s_eye.y, target.z - s_eye.z
+    local l = sqrt(dx * dx + dy * dy + dz * dz)
+    if l < 1 then return 0 end
+    return deg(math.acos(clamp((fx * dx + fy * dy + fz * dz) / l, -1, 1)))
+end
+
+local function survivor_error(s_eye, s_ang, p)
+    local eye, o
+    pcall(function() eye, o = p:EyePosition(), p:get_origin() end)
+    if not eye then return nil end
+    local e = aim_error(s_eye, s_ang, eye)
+    if o then
+        e = min(e, aim_error(s_eye, s_ang, V(o.x, o.y, o.z + 36)), aim_error(s_eye, s_ang, V(o.x, o.y, o.z + 20)))
+    end
+    return e, dist(eye, s_eye)
+end
+
+-- [CONTINUA en la PARTE 2/3 de autocut tounge.txt]
+===== END: autocut tounge.txt (PARTE 1/3) =====

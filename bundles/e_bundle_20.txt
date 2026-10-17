@@ -1,0 +1,226 @@
+
+===== FILE: LolModel2.lua (PARTE 5/5) =====
+    if cfg.gizmo_enabled then
+        local modes = { {"G","move"}, {"R","rotate"}, {"S","scale"} }
+        for _, mv in ipairs(modes) do
+            local active = cfg.gizmo_mode == mv[2]
+            local lbl2   = active and ("[" .. mv[1] .. "]") or (" " .. mv[1] .. " ")
+            if imgui.Button(lbl2 .. "##gm_" .. mv[1], 26, 20) then
+                cfg.gizmo_mode = mv[2]
+            end
+            imgui.SameLine()
+        end
+        imgui.TextDisabled("G=Move  R=Rot  S=Scale  |  LMB=select  drag=transform")
+    end
+
+    imgui.NewLine()
+
+    local vpw = VW - 8
+    local vph = math.min(math.floor(vpw * RT_H / RT_W), CH - 68)
+    local px, py = imgui.GetCursorScreenPos()
+
+    cfg.vp_px = px; cfg.vp_py = py
+    cfg.vp_pw = vpw; cfg.vp_ph = vph
+
+    imgui.InvisibleButton("##ivp", vpw, vph)
+    local vp_hovered = imgui.IsItemHovered()
+    local vp_clicked = imgui.IsItemClicked and imgui.IsItemClicked(0)
+
+    if cfg.rt then
+        local rtex = model.rt_tex(cfg.rt)
+        if rtex then
+            model.imgui_image(rtex, px, py, px + vpw, py + vph)
+        end
+    end
+
+    imgui.win_draw_rect(px, py, px + vpw, py + vph, 0.12, 0.12, 0.2, 1, 1)
+
+    draw_esp_overlay(px, py, vpw, vph)
+
+    if cfg.gizmo_enabled and cfg.selected_bone > 0 and
+       cfg.r_skeleton and cfg.mdl then
+        draw_gizmo(dl, cfg.selected_bone)
+    end
+
+    if cfg.gizmo_enabled and cfg.r_skeleton and cfg.mdl and
+       cfg.last_world and cfg.last_view and cfg.last_proj then
+        imgui.PushClipRect(px, py, px + vpw, py + vph, true)
+        local bc = model.bone_count(cfg.mdl)
+        for bi = 1, bc do
+            local wx2, wy2, wz2 = bone_world_xyz(bi)
+            if wx2 then
+                local sx2, sy2 = world_to_vp(wx2, wy2, wz2)
+                if sx2 and
+                   sx2 >= px and sx2 <= px + vpw and
+                   sy2 >= py and sy2 <= py + vph then
+                    local issel = (bi == cfg.selected_bone)
+                    local cr,cg,cb,ca = 0.9, 0.9, 0.3, 0.9
+                    if issel then cr,cg,cb,ca = 1,0.6,0,1 end
+                    local r = issel and 5 or 3
+                    imgui.win_draw_line(sx2-r, sy2, sx2+r, sy2, cr,cg,cb,ca, issel and 2.5 or 1.5)
+                    imgui.win_draw_line(sx2, sy2-r, sx2, sy2+r, cr,cg,cb,ca, issel and 2.5 or 1.5)
+                end
+            end
+        end
+        imgui.PopClipRect()
+    end
+
+    if cfg.mdl then
+        imgui.win_draw_text(px+5, py+3, 0.4, 1, 0.4, 0.8,
+            string.format("%dm %db  dist=%.1f",
+                model.mesh_count(cfg.mdl),
+                model.bone_count(cfg.mdl),
+                cfg.cam_dist), 11)
+        if cfg.selected_bone > 0 then
+            local bnm = model.bone_name(cfg.mdl, cfg.selected_bone)
+                        or ("Bone " .. cfg.selected_bone)
+            local mode_str = cfg.gizmo_enabled and (" [" .. cfg.gizmo_mode .. "]") or ""
+            imgui.win_draw_text(px+5, py+16, 1, 0.8, 0.2, 0.9,
+                "Bone: " .. bnm .. mode_str, 11)
+        end
+        if cfg.selected_mesh > 0 then
+            local mnm = model.mesh_name(cfg.mdl, cfg.selected_mesh)
+                        or ("Mesh " .. cfg.selected_mesh)
+            imgui.win_draw_text(px+5, py+29, 0.4, 0.8, 1, 0.9, "Mesh: " .. mnm, 11)
+        end
+    end
+
+    if vp_hovered then
+        local mx, my = imgui.GetMousePos()
+
+
+        if imgui.IsMouseClicked(0) then
+            cfg.gizmo_active  = false
+            cfg.gizmo_axis    = nil
+            cfg.cam_orbiting  = false
+
+            if cfg.gizmo_enabled and cfg.r_skeleton then
+                if cfg.selected_bone > 0 then
+                    local hit = gizmo_hit(cfg.selected_bone, mx, my)
+                    if hit then
+                        cfg.gizmo_active      = true
+                        cfg.gizmo_axis        = hit
+                        cfg.gizmo_drag_origin = {x = mx, y = my}
+                        local ed = cfg.bone_edit[cfg.selected_bone] or {0,0,0,0,0,0}
+                        cfg.gizmo_bone_origin = {ed[1],ed[2],ed[3],ed[4],ed[5],ed[6]}
+                    else
+                        local picked = pick_bone(mx, my)
+                        if picked > 0 then
+                            cfg.selected_bone = picked
+                            cfg.prop_tab = "bone"
+                        else
+                            cfg.cam_orbiting = true
+                        end
+                    end
+                else
+                    local picked = pick_bone(mx, my)
+                    if picked > 0 then
+                        cfg.selected_bone = picked
+                        cfg.prop_tab = "bone"
+                    else
+                        cfg.cam_orbiting = true
+                    end
+                end
+            else
+                cfg.cam_orbiting = true
+            end
+        end
+
+        if imgui.IsMouseDragging(0) then
+            if cfg.gizmo_active and cfg.gizmo_drag_origin and cfg.selected_bone > 0 then
+                local ddx = mx - cfg.gizmo_drag_origin.x
+                local ddy = my - cfg.gizmo_drag_origin.y
+                gizmo_apply_drag(cfg.selected_bone, ddx, ddy)
+            elseif cfg.cam_orbiting then
+                local ddx, ddy = imgui.GetMouseDragDelta(0, 0)
+                imgui.ResetMouseDragDelta(0)
+                cfg.cam_yaw   = cfg.cam_yaw + ddx * 0.005
+                cfg.cam_pitch = math.max(-1.5, math.min(1.5, cfg.cam_pitch - ddy * 0.005))
+            end
+        end
+
+        if not imgui.IsMouseDown(0) then
+            cfg.gizmo_active = false
+            cfg.cam_orbiting = false
+        end
+
+        for btn = 1, 2 do
+            if imgui.IsMouseDragging(btn) then
+                local ddx, ddy = imgui.GetMouseDragDelta(btn, 0)
+                imgui.ResetMouseDragDelta(btn)
+                local f = cfg.cam_dist * 0.0015
+                cfg.cam_ty = cfg.cam_ty + ddy * f
+                cfg.cam_tx = cfg.cam_tx - ddx * math.cos(cfg.cam_yaw) * f
+                cfg.cam_tz = cfg.cam_tz - ddx * math.sin(cfg.cam_yaw) * f
+            end
+        end
+
+        local wheel = model.imgui_wheel()
+        if wheel ~= 0 then
+            cfg.cam_dist = math.max(0.5, cfg.cam_dist - wheel * 0.5)
+            model.consume_wheel()
+        end
+    else
+        if not imgui.IsMouseDown(0) then
+            cfg.gizmo_active = false
+        end
+    end
+
+    imgui.Spacing()
+    imgui.PushItemWidth(105)
+    local sc, scc = imgui.SliderFloat("Scale##vs", cfg.mdl_scale, 0.01, 30)
+    if scc then cfg.mdl_scale = sc end
+    imgui.SameLine()
+    local yw, ywc = imgui.SliderFloat("Yaw##vy", cfg.mdl_yaw, -180, 180)
+    if ywc then cfg.mdl_yaw = yw end
+    imgui.SameLine()
+    local dd, dc = imgui.SliderFloat("Dist##vd", cfg.cam_dist, 0.5, 200)
+    if dc then cfg.cam_dist = dd end
+    imgui.PopItemWidth()
+
+    imgui.EndChild()
+    imgui.SameLine()
+
+    imgui.BeginChild("##props", PW, CH, true)
+
+    imgui.TextColored(1, 0.9, 0.3, 1, "Properties")
+    imgui.Separator()
+
+    if imgui.Button(cfg.prop_tab=="bone"   and "[Bone]"   or " Bone   ", 62, 20) then cfg.prop_tab="bone"   end
+    imgui.SameLine()
+    if imgui.Button(cfg.prop_tab=="mesh"   and "[Mesh]"   or " Mesh   ", 62, 20) then cfg.prop_tab="mesh"   end
+    imgui.SameLine()
+    if imgui.Button(cfg.prop_tab=="render" and "[Render]" or " Render ", 72, 20) then cfg.prop_tab="render" end
+    imgui.Separator()
+    imgui.Spacing()
+
+    if cfg.prop_tab == "bone" then
+        ui_prop_bone(PW)
+    elseif cfg.prop_tab == "mesh" then
+        ui_prop_mesh(PW)
+    else
+        ui_prop_render(PW)
+    end
+
+    imgui.EndChild()
+
+    imgui.End()
+end
+
+cfg.rt = model.create_rt(RT_W, RT_H)
+if not cfg.rt then client.log("[viewer] render target creation failed", 3) end
+
+scan()
+if #cfg.fbx_list > 0 then load_model() end
+
+function on_unload()
+    if cfg.mdl then model.free(cfg.mdl);   cfg.mdl = nil end
+    if cfg.rt  then model.free_rt(cfg.rt); cfg.rt  = nil end
+    for _, tex in pairs(cfg.tex_overrides) do
+        if tex then client.release_texture(tex) end
+    end
+    normal_cache      = {}
+    cfg.bone_edit     = {}
+    cfg.tex_overrides = {}
+end
+===== END: LolModel2.lua (PARTE 5/5) =====

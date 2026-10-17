@@ -1,0 +1,246 @@
+
+===== FILE: edge jump.txt (PARTE 1/3) =====
+local CFG = {
+    enabled   = true,
+    no_crouch = false,
+    debug     = true,
+    min_speed = 15,
+    key       = 0,
+    key_src   = "in",
+}
+
+local PL      = "CTerrorPlayer"
+local IN_JUMP = IN_JUMP or 2
+local IN_DUCK = IN_DUCK or 4
+local LADDER  = 9
+local floor, sqrt = math.floor, math.sqrt
+local clock = (os and os.clock) or function() return GlobalVars.curtime() end
+
+local IPT = 1 / 30
+pcall(function() local v = GlobalVars.interval_per_tick(); if type(v) == "number" and v > 0 then IPT = v end end)
+
+local function say(s) pcall(client.print, "[edgejump] " .. s) end
+local function has_bit(v, b) return floor(v / b) % 2 == 1 end
+local function V(x, y, z) return { x = x, y = y, z = z } end
+
+local function on_ground(lp)
+    local g
+    pcall(function() g = lp:is_on_ground() end)
+    if g == nil then pcall(function() g = has_bit(lp:get_flags(), 1) end) end
+    return g == true
+end
+
+local MASK = 0x1400B
+local use_mask = true
+local function hit(a, b)
+    local ok, r
+    if use_mask then ok, r = pcall(EngineTrace.TraceRay, a, b, MASK)
+    else ok, r = pcall(EngineTrace.TraceRay, a, b) end
+    if not ok or type(r) ~= "table" then return nil, r end
+    if r.did_hit ~= nil then return r.did_hit == true, r end
+    if type(r.fraction) == "number" then return r.fraction < 0.999, r end
+    return nil, r
+end
+
+local STEP = 18
+local SKIP = { "Weapon", "Pistol", "Rifle", "Shotgun", "SMG", "Sniper", "Submachine", "Grenade", "Chainsaw",
+               "Melee", "FirstAid", "Pills", "Adrenaline", "Defib", "PipeBomb", "Molotov", "VomitJar", "Upgrade",
+               "GasCan", "Player", "Bot", "Infected", "Tank", "Boomer", "Hunter", "Smoker", "Jockey", "Spitter",
+               "Charger", "Witch", "Ragdoll", "Projectile" }
+
+local function hit_class(r)
+    local e, c = r.entity, nil
+    if e == nil then return nil end
+    pcall(function()
+        if type(e) == "number" then e = ClientEntityList.GetClientEntity(e) end
+        c = e:get_class_name()
+    end)
+    return c
+end
+
+local function skip_class(cls)
+    if not cls then return false end
+    for _, w in ipairs(SKIP) do
+        if cls:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+local function ground_under(x, y, z, inner)
+    for _, up in ipairs({ 4, 12, 24 }) do
+        local top = z + up
+        local h, r = hit(V(x, y, top), V(x, y, z - STEP - 1))
+        if h == nil then return nil end
+        if r.startsolid ~= true then
+            if not h then return false, "nothing" end
+            local hz
+            if type(r.endpos) == "table" and type(r.endpos.z) == "number" then hz = r.endpos.z
+            elseif type(r.fraction) == "number" then hz = top + (z - STEP - 1 - top) * r.fraction end
+            local drop = hz and (z - hz) or 0
+            local nz = type(r.plane_normal) == "table" and r.plane_normal.z or nil
+            local cls = hit_class(r)
+            local info = string.format("%.0f down, slope %s, %s", drop, nz and string.format("%.2f", nz) or "?", tostring(cls or "world"))
+            if drop < -4 then
+                if inner and drop >= -STEP and (type(nz) ~= "number" or nz >= 0.7) and not skip_class(cls) then return true, info, drop end
+                return "solid", info
+            end
+            if drop > STEP + 0.25 then return false, info end
+            if type(nz) == "number" and nz < 0.7 then return false, info end
+            if skip_class(cls) then return false, info end
+            return true, info, drop
+        end
+    end
+    return "solid", "inside something"
+end
+
+local CORNERS = { { 0, 0 }, { 8, 0 }, { -8, 0 }, { 0, 8 }, { 0, -8 }, { 8, 8 }, { 8, -8 }, { -8, 8 }, { -8, -8 },
+                  { 16, 16 }, { 16, -16 }, { -16, 16 }, { -16, -16 }, { 16, 0 }, { -16, 0 }, { 0, 16 }, { 0, -16 } }
+
+local function thin_floor(x, y, z, need_low)
+    for _, dz in ipairs({ 1, 8 }) do
+        for _, o in ipairs({ -12, -6, 0, 6, 12 }) do
+            for _, d in ipairs({ { V(x - 14, y + o, z - dz), V(x + 14, y + o, z - dz) },
+                                 { V(x + o, y - 14, z - dz), V(x + o, y + 14, z - dz) } }) do
+                local h, r = hit(d[1], d[2])
+                if h == nil then return nil end
+                if (h or r.startsolid == true) and not skip_class(hit_class(r)) then
+                    local px, py = d[1].x, d[1].y
+                    if r.startsolid ~= true and type(r.endpos) == "table" and type(r.endpos.x) == "number" then
+                        local ux, uy = d[2].x - d[1].x, d[2].y - d[1].y
+                        local l = sqrt(ux * ux + uy * uy)
+                        px, py = r.endpos.x + ux / l * 0.5, r.endpos.y + uy / l * 0.5
+                    end
+                    local g, info, drop = ground_under(px, py, z, true)
+                    if g == true and (not need_low or drop >= -1.5) then return true, "thin floor: " .. info end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function floor_at(x, y, z, need_low)
+    local unknown, seen_open, raised = false, false, nil
+    for _, c in ipairs(CORNERS) do
+        local inner = c[1] >= -8 and c[1] <= 8 and c[2] >= -8 and c[2] <= 8
+        local g, info, drop = ground_under(x + c[1], y + c[2], z, inner)
+        local where = string.format("(%+d,%+d) %s", c[1], c[2], info or "")
+        if g == true and need_low and drop < -1.5 then
+            raised = raised or where
+            g = false
+        end
+        if g == true then return true, where end
+        if g == nil then unknown = true elseif g == false then seen_open = true end
+    end
+    if unknown or not seen_open then return nil end
+    local t, info = thin_floor(x, y, z, need_low)
+    if t == true then return true, info end
+    if t == nil then return nil end
+    return false, raised and ("only a raised surface ahead " .. raised) or nil
+end
+
+local check = { ok = nil, tested_at = -99, fails = 0 }
+local function selftest(lp)
+    if check.ok ~= nil or clock() - check.tested_at < 1 then return end
+    check.tested_at = clock()
+    local o, e
+    pcall(function() o = lp:get_origin(); e = lp:EyePosition() end)
+    if not o or not e or not on_ground(lp) then return end
+    local down, r = hit(V(o.x, o.y, o.z + 4), V(o.x, o.y, o.z - STEP - 1))
+    if use_mask and (down == nil or (type(r) == "table" and r.startsolid == true)) then
+        use_mask = false
+        down, r = hit(V(o.x, o.y, o.z + 4), V(o.x, o.y, o.z - STEP - 1))
+    end
+    local up = hit(V(e.x, e.y, e.z), V(e.x, e.y, e.z + 8))
+    local inside = type(r) == "table" and r.startsolid == true
+    if down == nil or inside then
+        check.fails = check.fails + 1
+        if check.fails >= 3 then check.ok = false; say("TraceRay not usable here (" .. tostring(r) .. ") - edge jump is off") end
+    elseif down and up == false then
+        check.ok = true
+        if CFG.debug then say("ground check working (TraceRay" .. (use_mask and ", sees player clip)" or ", no player clip)")) end
+    end
+end
+
+local function allowed(cmd, lp)
+    local ok = true
+    pcall(function()
+        if not lp:is_alive() or lp:is_incapacitated() then ok = false; return end
+        if lp.is_hanging_from_ledge and lp:is_hanging_from_ledge() then ok = false; return end
+        if lp:get_prop_int(PL, "movetype") == LADDER then ok = false end
+    end)
+    if not ok then return false end
+    local b = cmd:get_buttons() or 0
+    if has_bit(b, IN_JUMP) then return false end
+    if CFG.no_crouch and has_bit(b, IN_DUCK) then return false end
+    local v = lp:get_velocity()
+    return v ~= nil and sqrt(v.x * v.x + v.y * v.y) >= CFG.min_speed
+end
+
+local jumps = 0
+local ring, was_ground, jumped_last, prev_here = {}, false, false, nil
+
+local function note(lp, ok_now, here, nxt, seen)
+    local o, v = lp:get_origin(), lp:get_velocity()
+    ring[#ring + 1] = string.format("pos %.0f %.0f %.0f  speed %.0f  allowed %s  floor here %s  next %s%s",
+        o.x, o.y, o.z, sqrt(v.x * v.x + v.y * v.y), ok_now and "yes" or "no", tostring(here), tostring(nxt),
+        seen and ("  [" .. seen .. "]") or "")
+    if #ring > 8 then table.remove(ring, 1) end
+end
+
+local function tick(cmd, lp)
+    local g = on_ground(lp)
+    if CFG.debug and was_ground and not g and not jumped_last and #ring > 0 then
+        say("went off an edge without an edge jump - last ticks:")
+        for _, l in ipairs(ring) do say("  " .. l) end
+    end
+    was_ground = g
+    local b = cmd:get_buttons() or 0
+    jumped_last = has_bit(b, IN_JUMP)
+    if not g then ring = {}; prev_here = nil; return end
+
+    selftest(lp)
+    local ok_now = check.ok == true and allowed(cmd, lp)
+    local here, nxt, seen = "-", "-", nil
+    if ok_now then
+        local o, v = lp:get_origin(), lp:get_velocity()
+        here = floor_at(o.x, o.y, o.z)
+        local why
+        if here == true then
+            nxt, seen = floor_at(o.x + v.x * IPT, o.y + v.y * IPT, o.z, true)
+            if nxt == false then why = seen and ("floor ends next tick, " .. seen) or "floor ends next tick" end
+        end
+        if why then
+            cmd:set_buttons(b + IN_JUMP)
+            jumped_last = true
+            jumps = jumps + 1
+            if CFG.debug then say(string.format("edge jump #%d (%s) at %.0f %.0f %.0f", jumps, why, o.x, o.y, o.z)) end
+        end
+    end
+    prev_here = (here == true or here == false) and here or nil
+    pcall(note, lp, ok_now, here, nxt, seen)
+end
+
+local IG = {
+    button   = imgui.Button or imgui.button,
+    checkbox = imgui.Checkbox or imgui.checkbox,
+    text     = imgui.Text or imgui.text,
+    sint     = imgui.SliderInt or imgui.slider_int,
+    sfloat   = imgui.SliderFloat or imgui.slider_float,
+    begin    = imgui.Begin or imgui.begin_window or imgui.begin,
+    finish   = imgui.End or imgui.end_window,
+    key      = imgui.is_key_down or imgui.IsKeyDown,
+    mouse    = imgui.is_mouse_down or imgui.IsMouseDown,
+}
+
+local VKNAME = { [1] = "MOUSE1", [2] = "MOUSE2", [4] = "MOUSE3", [5] = "MOUSE4", [6] = "MOUSE5",
+    [8] = "BACKSPACE", [9] = "TAB", [13] = "ENTER", [16] = "SHIFT", [17] = "CTRL", [18] = "ALT",
+    [20] = "CAPSLOCK", [27] = "ESC", [32] = "SPACE", [160] = "LSHIFT", [161] = "RSHIFT",
+    [162] = "LCTRL", [163] = "RCTRL", [164] = "LALT", [165] = "RALT" }
+for i = 0, 9 do VKNAME[48 + i] = tostring(i) end
+for i = 0, 25 do VKNAME[65 + i] = string.char(65 + i) end
+for i = 1, 12 do VKNAME[111 + i] = "F" .. i end
+local MOUSE_VK = { [0] = 1, [1] = 2, [2] = 4, [3] = 5, [4] = 6 }
+
+-- [CONTINUA en la PARTE 2/3 de edge jump.txt]
+===== END: edge jump.txt (PARTE 1/3) =====

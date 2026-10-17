@@ -1,0 +1,340 @@
+
+===== FILE: LolModel2.lua (PARTE 1/5) =====
+local ffi = require("ffi")
+ffi.cdef[[
+    typedef struct { float x,y,z, nx,ny,nz; unsigned int col; float u,v; } EchVertex;
+]]
+
+local RT_W, RT_H   = 800, 520
+local DEG2RAD      = math.pi / 180.0
+
+local cfg = {
+    fbx_folder  = [[E:\Mimi_00]],
+    tex_folder  = [[E:\Mimi_00]],
+    fbx_list    = {},
+    sel_idx     = 1,
+
+    mdl = nil,
+    rt  = nil,
+
+    cam_yaw   = 0.3,   cam_pitch = 0.2,
+    cam_dist  = 15.0,
+    cam_tx    = 0.0,   cam_ty    = 5.0,  cam_tz = 0.0,
+
+    mdl_scale = 8.0,
+    mdl_yaw   = 0.0,
+
+    r_textured  = true,
+    r_chams     = false,
+    r_wire      = false,
+    r_outline   = false,
+    r_glow      = false,
+    r_skeleton  = false,
+    r_bbox      = false,
+    r_esp       = false,
+    r_autorot   = false,
+
+    gizmo_enabled  = false,
+    gizmo_mode     = "move",
+    gizmo_space    = "local",
+    gizmo_active   = false,
+    cam_orbiting   = false,
+    gizmo_axis     = nil,
+    gizmo_drag_origin = nil,
+    gizmo_bone_origin = nil,
+
+    vis_col   = {1.0, 0.2, 0.2, 1.0},
+    occ_col   = {0.0, 0.3, 1.0, 0.4},
+    ol_col    = {1.0, 1.0, 0.0, 1.0},
+    ol_thick  = 1.05,
+    gl_col    = {0.0, 0.8, 1.0, 1.0},
+    gl_thick  = 1.10,
+    esp_col   = {0.0, 1.0, 0.4, 1.0},
+    tex_alpha = 1.0,
+
+    mesh_visible = {},
+    tex_overrides = {},
+    custom_tex_path = "",
+    direct_fbx_path = "",
+    pose_path       = [[E:\Mimi_00\pose_default.lua]],
+
+    bone_edit     = {},
+    selected_bone = 0,
+
+    selected_mesh   = 0,
+    outliner_tab    = "meshes",
+    prop_tab        = "render",
+
+    last_world = nil,
+    last_view  = nil,
+    last_proj  = nil,
+
+    vp_px = 0, vp_py = 0, vp_pw = 0, vp_ph = 0,
+}
+
+local normal_cache = {}
+
+local function cache_normals(mdl)
+    normal_cache = {}
+    if not mdl then return end
+    for mi = 1, model.mesh_count(mdl) do
+        local ptr, count = model.lock_verts(mdl, mi)
+        if not ptr then break end
+        local vp = ffi.cast("EchVertex*", ptr)
+        local e  = { count = count, nx = {}, ny = {}, nz = {}, orig = {} }
+        for i = 0, count - 1 do
+            e.nx[i]   = vp[i].nx
+            e.ny[i]   = vp[i].ny
+            e.nz[i]   = vp[i].nz
+            e.orig[i] = vp[i].col
+        end
+        normal_cache[mi] = e
+        model.unlock_verts(mdl, mi)
+    end
+end
+
+local function fit_camera(m)
+    local x1,y1,z1 = model.get_bmin(m)
+    local x2,y2,z2 = model.get_bmax(m)
+    local bsize = math.max(x2-x1, y2-y1, z2-z1)
+    if bsize < 0.001 then return end
+    cfg.mdl_scale = 10.0 / bsize
+    cfg.cam_tx = (x1+x2)*0.5 * cfg.mdl_scale
+    cfg.cam_ty = (y1+y2)*0.5 * cfg.mdl_scale
+    cfg.cam_tz = (z1+z2)*0.5 * cfg.mdl_scale
+    cfg.cam_dist = 10.0 * 1.8
+end
+
+local function reset_bone(i)
+    cfg.bone_edit[i] = { 0,0,0, 0,0,0 }
+end
+
+local function init_after_load(m)
+    cache_normals(m)
+    fit_camera(m)
+
+    cfg.bone_edit     = {}
+    cfg.mesh_visible  = {}
+    cfg.selected_bone = 0
+    cfg.selected_mesh = 0
+
+    local bc = model.bone_count(m)
+    for i = 1, bc do reset_bone(i) end
+
+    local mc = model.mesh_count(m)
+    for i = 1, mc do
+        cfg.mesh_visible[i] = true
+        model.set_mesh_visible(m, i, true)
+    end
+end
+
+local function scan()
+    cfg.fbx_list = model.scan_fbx(cfg.fbx_folder)
+end
+local function load_model()
+    for _, tex in pairs(cfg.tex_overrides) do
+        if tex then client.release_texture(tex) end
+    end
+    cfg.tex_overrides = {}
+
+    if cfg.mdl then model.free(cfg.mdl); cfg.mdl = nil end
+    if cfg.sel_idx < 1 or cfg.sel_idx > #cfg.fbx_list then return end
+
+    local fbx_dir = cfg.fbx_list[cfg.sel_idx]:match("^(.*)[/\\][^/\\]+$")
+    if fbx_dir and fbx_dir ~= "" then cfg.tex_folder = fbx_dir end
+
+    local m, err = model.load(cfg.fbx_list[cfg.sel_idx], cfg.tex_folder)
+    if not m then
+        client.log("[viewer] " .. (err or "load failed"), 3)
+        return
+    end
+    cfg.mdl = m
+    init_after_load(m)
+
+    for i = 1, model.mesh_count(m) do
+        local mn = model.mesh_name(m, i)
+        if mn then
+            local tname = mn:gsub("^mt_", "tx_") .. "_Base.tga"
+            local tex   = client.load_texture(cfg.tex_folder .. "\\" .. tname)
+            if tex then
+                cfg.tex_overrides[i] = tex
+                model.set_mesh_tex(m, i, tex)
+            end
+        end
+    end
+
+    client.log(string.format("[viewer] loaded  %dm  %db  tex=%s",
+        model.mesh_count(m), model.bone_count(m), cfg.tex_folder), 1)
+end
+
+local function pose_save(path)
+    local f, err = io.open(path, "w")
+    if not f then
+        client.log("[pose] save failed: " .. (err or "?"), 3)
+        return false
+    end
+
+    f:write("-- Pose file saved by Model Viewer\n")
+    f:write(string.format("-- Model: %s\n",
+        cfg.fbx_list[cfg.sel_idx] or "unknown"))
+    f:write(string.format("-- Date: %s\n\n", os.date("%Y-%m-%d %H:%M:%S")))
+
+    if not cfg.mdl then f:close(); return false end
+    local bc = model.bone_count(cfg.mdl)
+    f:write("return {\n")
+    for i = 1, bc do
+        local ed = cfg.bone_edit[i]
+        if ed and (ed[1]~=0 or ed[2]~=0 or ed[3]~=0 or
+                   ed[4]~=0 or ed[5]~=0 or ed[6]~=0) then
+            local nm = model.bone_name(cfg.mdl, i) or ("bone_" .. i)
+            nm = nm:gsub("%*", ""):gsub("\n", "")
+            f:write(string.format(
+                "  [%d] = { %.6f, %.6f, %.6f, %.6f, %.6f, %.6f }, -- %s\n",
+                i, ed[1], ed[2], ed[3], ed[4], ed[5], ed[6], nm))
+        end
+    end
+    f:write("}\n")
+    f:close()
+    client.log("[pose] saved to " .. path, 1)
+    return true
+end
+
+local function pose_load(path)
+    local f, err = io.open(path, "r")
+    if not f then
+        client.log("[pose] load failed: " .. (err or "?"), 3)
+        return false
+    end
+    f:close()
+
+    local ok, data = pcall(dofile, path)
+    if not ok or type(data) ~= "table" then
+        client.log("[pose] invalid pose file: " .. tostring(data), 3)
+        return false
+    end
+
+    if not cfg.mdl then
+        client.log("[pose] no model loaded to apply pose to", 2)
+        return false
+    end
+
+    local bc = model.bone_count(cfg.mdl)
+    local applied = 0
+    for i, ed in pairs(data) do
+        if type(i) == "number" and type(ed) == "table" and
+           i >= 1 and i <= bc then
+            if not cfg.bone_edit[i] then reset_bone(i) end
+            cfg.bone_edit[i][1] = ed[1] or 0
+            cfg.bone_edit[i][2] = ed[2] or 0
+            cfg.bone_edit[i][3] = ed[3] or 0
+            cfg.bone_edit[i][4] = ed[4] or 0
+            cfg.bone_edit[i][5] = ed[5] or 0
+            cfg.bone_edit[i][6] = ed[6] or 0
+            model.bone_set_pose(cfg.mdl, i,
+                cfg.bone_edit[i][1], cfg.bone_edit[i][2], cfg.bone_edit[i][3],
+                cfg.bone_edit[i][4], cfg.bone_edit[i][5], cfg.bone_edit[i][6])
+            applied = applied + 1
+        end
+    end
+    client.log(string.format("[pose] applied %d bone(s) from %s", applied, path), 1)
+    return true
+end
+
+local function do_render()
+    if not cfg.mdl or not cfg.rt then return end
+
+    model.apply_skinning(cfg.mdl)
+
+    if cfg.r_autorot then
+        cfg.mdl_yaw = (cfg.mdl_yaw + client.get_frametime() * 45.0) % 360.0
+    end
+
+    model.begin_rt(cfg.rt, 0.08, 0.08, 0.10)
+
+    local cd  = math.max(0.5, cfg.cam_dist)
+    local cp, cy      = cfg.cam_pitch, cfg.cam_yaw
+    local ctx, cty, ctz = cfg.cam_tx, cfg.cam_ty, cfg.cam_tz
+
+    local ey = cty + cd * math.sin(cp)
+    local ex = ctx + cd * math.cos(cp) * math.sin(cy)
+    local ez = ctz - cd * math.cos(cp) * math.cos(cy)
+
+    local view  = model.mat_lookat_lh(ex, ey, ez, ctx, cty, ctz)
+    local proj  = model.mat_persp_lh(0.8, RT_W / RT_H, 0.1, 1000.0)
+    model.set_view(view)
+    model.set_proj(proj)
+
+    local yr    = cfg.mdl_yaw * DEG2RAD
+    local world = model.mat_mul(model.mat_scale(cfg.mdl_scale), model.mat_roty(yr))
+    cfg.last_world = world
+    cfg.last_view  = view
+    cfg.last_proj  = proj
+
+    local ok, err = pcall(function()
+        if cfg.r_outline then
+            local c = cfg.ol_col
+            model.render_screen_outline(cfg.mdl, world,
+                c[1],c[2],c[3],c[4], cfg.ol_thick, RT_W, RT_H)
+        end
+        if cfg.r_glow then
+            local c = cfg.gl_col
+            model.render_screen_glow(cfg.mdl, world,
+                c[1],c[2],c[3],c[4], cfg.gl_thick, RT_W, RT_H)
+        end
+        if cfg.r_chams then
+            local v, o = cfg.vis_col, cfg.occ_col
+            model.render_chams(cfg.mdl, world,
+                v[1],v[2],v[3],v[4],  o[1],o[2],o[3],o[4])
+        end
+        if cfg.r_textured then
+            model.render_textured(cfg.mdl, world, cfg.tex_alpha)
+        end
+        if cfg.r_wire then
+            model.rs(model.RS_ZFUNC, 8)
+            model.render_wireframe(cfg.mdl, world, 0, 1, 0, 1)
+            model.rs(model.RS_ZFUNC, model.CMP_LESSEQUAL)
+        end
+        if cfg.r_skeleton then
+            model.render_blender_skeleton(cfg.mdl, world,
+                0.15, 0.55, 0.9, 1.0, cfg.selected_bone)
+        end
+        if cfg.r_bbox then
+            model.render_bbox(cfg.mdl, world, 0, 1, 1, 1)
+        end
+    end)
+
+    if not ok then
+        client.log("[render] " .. tostring(err), 2)
+    end
+
+    model.rs(model.RS_ALPHABLENDENABLE, 1)
+    model.rs(19, 5)
+    model.rs(20, 6)
+    model.rs(model.RS_ZENABLE,        1)
+    model.rs(model.RS_ZWRITEENABLE,   1)
+    model.rs(model.RS_ZFUNC,          model.CMP_LESSEQUAL)
+    model.rs(model.RS_LIGHTING,       0)
+    model.rs(model.RS_FILLMODE,       model.FILL_SOLID)
+    model.rs(model.RS_CULLMODE,       model.CULL_CCW)
+    model.rs(168,                     0xF)
+
+    model.end_rt(cfg.rt)
+end
+
+local function world_to_vp(wx, wy, wz)
+    if not (cfg.last_view and cfg.last_proj) then return nil end
+    local sx, sy = model.project(cfg.last_view, cfg.last_proj, RT_W, RT_H, wx, wy, wz)
+    if not sx then return nil end
+
+    local scx = cfg.vp_px + sx * (cfg.vp_pw / RT_W)
+    local scy = cfg.vp_py + sy * (cfg.vp_ph / RT_H)
+    return scx, scy
+end
+
+local function bone_world_xyz(bi)
+    if not (cfg.mdl and cfg.last_world) then return nil end
+    return model.bone_world_pos(cfg.mdl, cfg.last_world, bi)
+end
+
+-- [CONTINUA en la PARTE 2/5 de LolModel2.lua]
+===== END: LolModel2.lua (PARTE 1/5) =====

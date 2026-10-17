@@ -1,0 +1,94 @@
+
+===== FILE: tankrockesp.txt (PARTE 2/2) =====
+local function checkbox(label, cur)
+    if W.broken or W.value_first == nil then
+        local ok, r = pcall(imgui.Button, (cur and "[ON]  " or "[off] ") .. label .. "##tr_on")
+        if ok and r == true then return not cur end
+        return cur
+    end
+    local ok, r1, r2 = pcall(imgui.Checkbox, label .. "##tr_on", cur)
+    if not ok then W.broken = true; return cur end
+    local new
+    if r2 == nil then
+        if W.value_first then new = r1 else new = (r1 == true) and not cur or cur end
+    elseif W.value_first then new = r1 else new = r2 end
+    if type(new) ~= "boolean" then W.broken = true; return cur end
+    if new ~= cur then
+        local t = clock()
+        if t - W.last_flip < 0.05 then W.broken = true; return cur end
+        W.last_flip = t
+    end
+    return new
+end
+
+local function draw_ui()
+    local v = checkbox("Show tank rocks", enabled)
+    if v ~= enabled then enabled = v; save() end
+    detect()
+end
+
+local tab_ok = false
+pcall(function()
+    local args = { "Tank Rock" }
+    local unpack_ = unpack or table.unpack
+    for _ = 1, 6 do
+        local ok, err = pcall(menu.add_main_tab, unpack_(args))
+        if ok then tab_ok = true; return end
+        local n, want = tostring(err):match("bad argument #(%d+) to '[^']*' %((%a+) expected")
+        n = tonumber(n)
+        if not n or n ~= #args + 1 then return end
+        if want == "string" then args[n] = "Tank Rock"
+        elseif want == "function" then args[n] = draw_ui
+        elseif want == "number" then args[n] = 0
+        elseif want == "boolean" then args[n] = true
+        else return end
+    end
+end)
+if not tab_ok then
+    local prev_paint = on_paint
+    function on_paint()
+        if prev_paint then pcall(prev_paint) end
+        local open = false
+        pcall(function() open = menu.is_open() end)
+        if not open then return end
+        if pcall(imgui.Begin, "Tank Rock##echidna_tankrock") then pcall(draw_ui) end
+        pcall(imgui.End)
+    end
+end
+
+pcall(client.print, "[tankrock] loaded")
+===== END: tankrockesp.txt (PARTE 2/2) =====
+
+===== FILE: togglechan.lua =====
+local VK_NUMPAD0    = 0x60
+local WRITE_AMOUNT  = 20000
+
+local active    = false
+local key_held  = false
+
+function on_key_down(key)
+    if key == VK_NUMPAD0 and not key_held then
+        key_held = true
+        active = not active
+        print("[seq] " .. (active and "ON" or "OFF"))
+    end
+end
+
+function on_key_up(key)
+    if key == VK_NUMPAD0 then
+        key_held = false
+    end
+end
+
+function on_create_move()
+    if not active then return end
+
+    local nc = EngineClient.GetNetChannelInfo()
+    if not nc or nc:IsNull() then return end
+
+    local current = nc:m_nOutSequenceNr()
+    if not current then return end
+
+    nc:SetOutSequenceNr(current + WRITE_AMOUNT)
+end
+===== END: togglechan.lua =====

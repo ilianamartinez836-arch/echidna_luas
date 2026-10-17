@@ -1,0 +1,122 @@
+
+===== FILE: disableaim.lua =====
+local ffi = require("ffi")
+
+ffi.cdef[[
+    typedef struct {
+        uint16_t e_magic;
+        uint8_t  pad[58];
+        uint32_t e_lfanew;
+    } IMAGE_DOS_HEADER;
+    typedef struct {
+        uint32_t BaseOfCode;
+        uint32_t SizeOfCode;
+    } IMAGE_OPTIONAL_HEADER_PARTIAL;
+    typedef struct {
+        uint32_t Signature;
+        uint8_t  FileHeader[20];
+        IMAGE_OPTIONAL_HEADER_PARTIAL OptionalHeader;
+    } IMAGE_NT_HEADERS32_PARTIAL;
+]]
+
+local IN_ATTACK       = 1
+local IN_USE          = 32
+local IN_ATTACK2      = 2048
+local MOVETYPE_NOCLIP = 8
+local MOVETYPE_LADDER = 9
+
+local hitscan_disabled_by_script = false
+local aa_disabled_by_script = false
+
+local client_base = ffi.cast("uintptr_t", memory.get_module_base("client.dll"))
+
+local function get_movetype()
+    local lp_ptr = ffi.cast("void**", client_base + 7498712)[0]
+    if lp_ptr == nil then return 0 end
+    local lp = tonumber(ffi.cast("uintptr_t", lp_ptr))
+    return memory.read_u8(lp + 0x144)
+end
+
+local function should_disable_rage(cmd, movetype)
+    if cmd:has_button(IN_USE)     then return true end
+    if cmd:has_button(IN_ATTACK2) then return true end
+    if movetype == MOVETYPE_LADDER or movetype == MOVETYPE_NOCLIP then return true end
+    return false
+end
+
+function on_create_move(cmd, local_player)
+    local_player = local_player or EntityCache.GetLocal()
+    if not local_player then return end
+
+    local current_movetype = get_movetype()
+
+    if should_disable_rage(cmd, current_movetype) then
+        if vars.get("hitscan.enable") == true then
+            vars.set("hitscan.enable", false)
+            hitscan_disabled_by_script = true
+        end
+    else
+        if hitscan_disabled_by_script then
+            vars.set("hitscan.enable", true)
+            hitscan_disabled_by_script = false
+        end
+    end
+
+    if current_movetype == MOVETYPE_LADDER or current_movetype == MOVETYPE_NOCLIP then
+        if vars.get("aa.enabled") == true then
+            vars.set("aa.enabled", false)
+            aa_disabled_by_script = true
+        end
+    else
+        if aa_disabled_by_script then
+            vars.set("aa.enabled", true)
+            aa_disabled_by_script = false
+        end
+    end
+end
+===== END: disableaim.lua =====
+
+===== FILE: disablefunctions.lua =====
+-- Disable specific features at load time
+echidna_features.disable("Feature_AntiAim")
+echidna_features.disable("Feature_NoSpread")
+echidna_features.disable("Feature_EnginePrediction")
+--echidna_features.disable("Feature_GlowSuppression")
+--echidna_features.disable("Feature_PunchAngleRemoval")
+
+-- Re-enable later
+--echidna_features.enable("Feature_AntiAim")
+
+-- Check state
+--print(echidna_features.is_enabled("Feature_Hitscan"))  -- true
+
+-- List all known flags and their states
+for _, pair in ipairs(echidna_features.list()) do print(pair[1], pair[2]) end
+===== END: disablefunctions.lua =====
+
+===== FILE: disablehooksdocumentation.lua =====
+-- List every controllable hook
+for _, name in ipairs(echidna_hooks.list()) do print(name, echidna_hooks.state(name)) end
+
+-- Replace ClientMode's CreateMove entirely with your own
+echidna_hooks.remove("ClientMode_CreateMove")
+
+-- Your hook via hooks.create (requires ffi=true)
+local addr = memory.find_pattern("client.dll", "55 8B EC ...")
+local myHook = hooks.create(addr, "bool(__fastcall*)(void*,void*,float,void*)",
+    function(orig, ecx, edx, frametime, cmd)
+        -- your logic
+        return orig(ecx, edx, frametime, cmd)
+    end)
+
+-- Temporarily mute on_paint from the engine without destroying the hook
+echidna_hooks.disable("EngineVGui_Paint")
+
+-- Restore it later
+echidna_hooks.enable("EngineVGui_Paint")
+
+-- Query before touching
+if echidna_hooks.state("BasePlayer_CalcPlayerView") ~= "removed" then
+    echidna_hooks.disable("BasePlayer_CalcPlayerView")
+end
+===== END: disablehooksdocumentation.lua =====

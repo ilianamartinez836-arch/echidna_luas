@@ -1,0 +1,256 @@
+
+===== FILE: autocut tounge.txt (PARTE 2/3) =====
+local function clear_view(smoker_idx, s_eye, lp, now)
+    if not CFG.wall then return nil end
+    local c = wall_cache[smoker_idx]
+    if c and now - c.t < 0.15 then return c.clear end
+    local pts = {}
+    pcall(function()
+        local e, o = lp:EyePosition(), lp:get_origin()
+        pts[#pts + 1] = e
+        if o then pts[#pts + 1] = V(o.x, o.y, o.z + 36); pts[#pts + 1] = V(o.x, o.y, o.z + 14) end
+    end)
+    local verdict = nil
+    for _, tgt in ipairs(pts) do
+        local dx, dy, dz = tgt.x - s_eye.x, tgt.y - s_eye.y, tgt.z - s_eye.z
+        local l = sqrt(dx * dx + dy * dy + dz * dz)
+        if l > 24 then
+            local steps = max(2, floor((l - 12) / 8))
+            local blocked, unknown = false, false
+            for i = 1, steps do
+                local f = (i / (steps + 1)) * ((l - 6) / l)
+                local s = solid_at(s_eye.x + dx * f, s_eye.y + dy * f, s_eye.z + dz * f)
+                if s == nil then unknown = true; break end
+                if s then blocked = true; break end
+            end
+            if unknown then verdict = nil; break end
+            if not blocked then verdict = true; break end
+            verdict = false
+        end
+    end
+    wall_cache[smoker_idx] = { t = now, clear = verdict }
+    return verdict
+end
+
+local function tongue_on_me(smoker, lp, now)
+    local s_eye, s_ang, alive
+    pcall(function() alive = smoker:is_alive(); s_eye, s_ang = smoker:EyePosition(), smoker:get_eye_angles() end)
+    if not alive or not s_eye or not s_ang then return false end
+    local my_err, my_d = survivor_error(s_eye, s_ang, lp)
+    if not my_err or my_d > srv.range + 50 then return false end
+    if my_err > AIM_TOL + deg(math.atan(24 / max(24, my_d))) then return false end
+    local my_idx = lp:entindex()
+    local mate = false
+    pcall(function()
+        for _, sv in ipairs(EntityCache.GetGroup(GROUP_SV)) do
+            if sv:entindex() ~= my_idx and sv:is_alive() then
+                local e, d = survivor_error(s_eye, s_ang, sv)
+                if e and d <= srv.range + 50 and e + 1.5 < my_err then mate = true end
+            end
+        end
+    end)
+    if mate then return false end
+    if clear_view(smoker:entindex(), s_eye, lp, now) == false then return false end
+    return true, dist(s_eye, lp:EyePosition())
+end
+
+local function smoker_aiming(lp, now)
+    local found = false
+    pcall(function()
+        for _, p in ipairs(all_infected()) do
+            if p:get_zombie_class() == ZC_SMOKER and p:is_alive() and not p:is_ghost() and not p:is_dormant() then
+                if tongue_on_me(p, lp, now) then found = true end
+            end
+        end
+    end)
+    return found
+end
+
+local function smoker_by_index(i)
+    local found
+    pcall(function()
+        for _, p in ipairs(all_infected()) do
+            if p:entindex() == i then found = p end
+        end
+    end)
+    return found
+end
+
+local function do_cut(cmd, lp, smoker)
+    local ang
+    pcall(function()
+        if smoker and smoker:is_alive() then
+            local p, y = angles_to(lp:EyePosition(), smoker:get_origin())
+            ang = V(clamp(p + TILT, -89, 89), y, 0)
+        else
+            local a = cmd:get_viewangles()
+            ang = V(clamp(a.x + TILT, -89, 89), a.y, 0)
+        end
+    end)
+    if ang then
+        local old
+        pcall(function() old = cmd:get_viewangles() end)
+        if set_angles(cmd, ang) and old and old.y then keep_movement(cmd, old.y, ang.y) end
+    end
+    pcall(function()
+        local b = cmd:get_buttons() or 0
+        if not has_bit(b, IN_ATTACK) then cmd:set_buttons(b + IN_ATTACK) end
+    end)
+end
+
+local function finish(result, now, back_delay)
+    if not tongue then return end
+    if result == "cut" then stats.cuts = stats.cuts + 1
+    elseif result == "dragged" then stats.dragged = stats.dragged + 1
+    elseif result == "missed" then
+        local sm = tongue.smoker
+        local m = smoker_miss[sm]
+        if m and now - m.t < 6 then m.n = m.n + 1; m.t = now else m = { n = 1, t = now }; smoker_miss[sm] = m end
+        if m.n >= 2 then smoker_block[sm] = now + BACKOFF end
+    end
+    local t = tongue
+    local first = t.pressed[1]
+    dbg(string.format("%s  dist %.0fu  predicted %.2f  grabbed %s  first swing %s",
+        result, t.dist or 0, t.pred_grab or 0, t.grab_t and string.format("%.2f", t.grab_t) or "-",
+        (first and t.grab_t) and string.format("%+.0fms", (first - t.grab_t) * 1000) or "-"))
+    stats.last = result
+    tongue = nil
+    preswap_block_until = max(preswap_block_until, now + 1.5)
+    if swapped_by_us then switch_back_at = now + (back_delay or 0.5); post_cut_release = true end
+end
+
+local function tick(cmd, lp)
+    if not CFG.enabled or not cmd or not lp then tongue = nil; fire_pending = false; return end
+    local alive = false
+    pcall(function() alive = lp:is_alive() and lp:get_team() == 2 end)
+    if not alive then tongue = nil; fire_pending = false; return end
+
+    local now = server_now(lp)
+    if not now then return end
+    refresh(now)
+    local is_melee = track_weapon(lp, now)
+
+    if fire_pending then
+        fire_pending = false
+        if not (tongue and tongue.grab_t) then
+            wall_cache = {}
+            local best, best_d
+            pcall(function()
+                for _, p in ipairs(all_infected()) do
+                    if p:get_zombie_class() == ZC_SMOKER and p:is_alive() and not p:is_dormant() then
+                        local on, d = tongue_on_me(p, lp, now)
+                        if on and (smoker_block[p:entindex()] or 0) > now then on = false end
+                        if on and (not best_d or d < best_d) then best, best_d = p, d end
+                    end
+                end
+            end)
+            if best then
+                local fire_t = best:get_prop_float(PL, "m_flSimulationTime") or now
+                local base = fire_t + best_d / srv.speed
+                local pred = base + correction()
+                local grace = (not CFG.switch and not melee_out(lp)) and GRACE or 0
+                tongue = { smoker = best:entindex(), fire_t = fire_t, dist = best_d, pred_grab = pred, base = base,
+                           win_s = pred - LEAD + grace, win_e = pred + 2 * IPT, pressed = {}, override = now < override_until }
+                stats.last = "tongue coming"
+                dbg(string.format("tongue from %d at you  dist %.0fu  lands in %.2fs", tongue.smoker, best_d, pred - now))
+            end
+        end
+    end
+
+    local owner
+    pcall(function() owner = player_handle(lp:get_prop_int(PL, "m_tongueOwner")) end)
+    if owner and owner ~= last_owner and tongue and tongue.smoker == owner and not tongue.grab_t then
+        local sm = smoker_by_index(owner)
+        local grab_t = sm and sm:get_prop_float(PL, "m_flSimulationTime") or now
+        local c = grab_t - tongue.base
+        if c > -0.4 and c < 0.6 then
+            corr[#corr + 1] = c; if #corr > 9 then table.remove(corr, 1) end
+            save_calib()
+        end
+        tongue.grab_t = grab_t
+    end
+    if not owner and last_owner and tongue and tongue.grab_t then
+        finish(now - tongue.grab_t < 1.5 and "cut" or "released", now)
+    end
+    last_owner = owner
+
+    if not tongue then
+        local aiming = CFG.switch and smoker_aiming(lp, now)
+        if now < override_until or now < preswap_block_until then
+            if aiming then
+                if now < override_until then override_until = max(override_until, now + 0.5) end
+                if now < preswap_block_until then preswap_block_until = max(preswap_block_until, now + 0.5) end
+            end
+            aiming = false
+        end
+        if aiming then aim_since = aim_since or now else aim_since = nil end
+        if aiming and now - aim_since >= PRESWAP then
+            preswap_seen = now
+            if not is_melee and cur_cls ~= "unknown" then swap_to_melee(now) end
+            switch_back_at = nil
+        elseif swapped_by_us and not switch_back_at and now - preswap_seen > 2.0 then
+            switch_back_at = now
+        end
+        if post_cut_release then
+            if not is_melee then post_cut_release = false
+            else
+                local b = 0
+                pcall(function() b = cmd:get_buttons() or 0 end)
+                if has_bit(b, IN_ATTACK) then pcall(function() cmd:set_buttons(b - IN_ATTACK) end)
+                else post_cut_release = false end
+            end
+        end
+        if switch_back_at and now >= switch_back_at then
+            switch_back_at = nil
+            if swapped_by_us and CFG.switch_back and is_melee then swap_back(now) end
+            swapped_by_us = false
+        end
+        return
+    end
+    switch_back_at = nil
+
+    local t_ref = tongue.grab_t or tongue.fire_t
+    if t_ref and now < t_ref - 1.0 then tongue = nil; return end
+    if tongue.grab_t and now - tongue.grab_t > 2.0 then finish("dragged", now); return end
+    if not tongue.grab_t and now > tongue.win_e + 0.5 then finish("missed", now); return end
+
+    local smoker = smoker_by_index(tongue.smoker)
+    if not tongue.grab_t then
+        local alive_s, se = true, nil
+        if smoker then pcall(function() alive_s = smoker:is_alive(); se = smoker:EyePosition() end) end
+        if smoker and not alive_s then finish("smoker died", now, 0.1); return end
+        if se and CFG.wall then
+            if clear_view(tongue.smoker, se, lp, now) == false then
+                tongue.lost = (tongue.lost or 0) + 1
+                if tongue.lost >= 3 then finish("lost sight", now, 1.0); return end
+            else
+                tongue.lost = 0
+            end
+        end
+    end
+
+    if tongue.override then stats.last = "you have the gun"; return end
+
+    if cur_cls ~= "unknown" and not is_melee then
+        if CFG.switch then swap_to_melee(now) end
+        stats.last = "gun out"
+        return
+    end
+
+    if now >= tongue.win_s and now <= tongue.win_e then
+        do_cut(cmd, lp, smoker)
+        tongue.pressed[#tongue.pressed + 1] = now
+        stats.last = "swinging"
+    elseif not tongue.grab_t and now < tongue.win_s then
+        if is_melee then
+            pcall(function()
+                local b = cmd:get_buttons() or 0
+                if has_bit(b, IN_ATTACK) then cmd:set_buttons(b - IN_ATTACK) end
+            end)
+        end
+        stats.last = string.format("swing in %.2fs", tongue.win_s - now)
+    end
+end
+
+-- [CONTINUA en la PARTE 3/3 de autocut tounge.txt]
+===== END: autocut tounge.txt (PARTE 2/3) =====

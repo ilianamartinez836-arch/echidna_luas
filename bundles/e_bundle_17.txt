@@ -1,0 +1,253 @@
+
+===== FILE: LolModel2.lua (PARTE 2/5) =====
+local BONE_HIT_RADIUS = 10
+local function pick_bone(mx, my)
+    if not cfg.mdl then return 0 end
+    local bc     = model.bone_count(cfg.mdl)
+    local best   = 0
+    local bestD  = BONE_HIT_RADIUS * BONE_HIT_RADIUS
+    for bi = 1, bc do
+        local wx, wy, wz = bone_world_xyz(bi)
+        if wx then
+            local sx, sy = world_to_vp(wx, wy, wz)
+            if sx then
+                local dx, dy = sx - mx, sy - my
+                local d2 = dx*dx + dy*dy
+                if d2 < bestD then bestD = d2; best = bi end
+            end
+        end
+    end
+    return best
+end
+
+local GIZMO_LEN   = 55
+local GIZMO_SHAFT = 8
+local RING_SEGS   = 48
+
+local AXIS_COL = {
+    X  = { {1,0.15,0.15,1},  {1,0.6,0.6,1}  },
+    Y  = { {0.15,1,0.15,1},  {0.6,1,0.6,1}  },
+    Z  = { {0.15,0.45,1,1},  {0.6,0.75,1,1} },
+    XY = { {1,1,0,0.55},     {1,1,0,0.9}    },
+    XZ = { {1,0,1,0.55},     {1,0,1,0.9}    },
+    YZ = { {0,1,1,0.55},     {0,1,1,0.9}    },
+}
+
+local function draw_gizmo(dl, bi)
+    if not (cfg.mdl and cfg.last_world and cfg.last_view and cfg.last_proj) then return end
+
+    local wx, wy, wz = bone_world_xyz(bi)
+    if not wx then return end
+    local ox, oy = world_to_vp(wx, wy, wz)
+    if not ox then return end
+
+    local mode = cfg.gizmo_mode
+
+    local function acol(axis)
+        local t = AXIS_COL[axis]
+        local active = (cfg.gizmo_axis == axis)
+        local c = active and t[2] or t[1]
+        return c[1], c[2], c[3], c[4]
+    end
+
+    local function screen_dir(dX, dY, dZ)
+
+        local tip_wx = wx + dX * 0.5
+        local tip_wy = wy + dY * 0.5
+        local tip_wz = wz + dZ * 0.5
+        local tx, ty = world_to_vp(tip_wx, tip_wy, tip_wz)
+        if not tx then return 1, 0 end
+        local dx, dy = tx - ox, ty - oy
+        local l = math.sqrt(dx*dx + dy*dy)
+        if l < 0.5 then return 1, 0 end
+        return dx/l, dy/l
+    end
+
+    local xdx, xdy = screen_dir(1,0,0)
+    local ydx, ydy = screen_dir(0,1,0)
+    local zdx, zdy = screen_dir(0,0,1)
+
+    if mode == "move" or mode == "scale" then
+        local PLANE_SZ = GIZMO_LEN * 0.22
+        local function plane_quad(ax1x,ax1y, ax2x,ax2y, axis_name)
+            local cx = ox + (ax1x + ax2x) * GIZMO_LEN * 0.32
+            local cy = oy + (ax1y + ax2y) * GIZMO_LEN * 0.32
+            local r,g,b,a = acol(axis_name)
+            imgui.win_draw_rect(cx - PLANE_SZ*0.5, cy - PLANE_SZ*0.5,
+                                cx + PLANE_SZ*0.5, cy + PLANE_SZ*0.5,
+                                r, g, b, a, 1, 0)
+            imgui.win_draw_rect(cx - PLANE_SZ*0.5+1, cy - PLANE_SZ*0.5+1,
+                                cx + PLANE_SZ*0.5-1, cy + PLANE_SZ*0.5-1,
+                                r, g, b, a*0.35, 0, 0)
+        end
+        plane_quad(xdx,xdy, ydx,ydy, "XY")
+        plane_quad(xdx,xdy, zdx,zdy, "XZ")
+        plane_quad(ydx,ydy, zdx,zdy, "YZ")
+
+        local function arrow(ddx, ddy, axis_name)
+            local r,g,b,a = acol(axis_name)
+            local ex = ox + ddx * GIZMO_LEN
+            local ey = oy + ddy * GIZMO_LEN
+            imgui.win_draw_line(ox, oy, ex, ey, r, g, b, a, 2.5)
+            local px, py = -ddy, ddx
+            local ahead  = 10
+            local aside  = 5
+            imgui.win_draw_line(ex, ey,
+                ex - ddx*ahead + px*aside, ey - ddy*ahead + py*aside,
+                r, g, b, a, 2)
+            imgui.win_draw_line(ex, ey,
+                ex - ddx*ahead - px*aside, ey - ddy*ahead - py*aside,
+                r, g, b, a, 2)
+            if mode == "scale" then
+                local hs = 5
+                imgui.win_draw_rect(ex-hs, ey-hs, ex+hs, ey+hs, r,g,b,a, 1.5, 0)
+                imgui.win_draw_rect(ex-hs+1, ey-hs+1, ex+hs-1, ey+hs-1, r,g,b,a*0.5, 0, 0)
+            end
+        end
+        arrow(xdx, xdy, "X")
+        arrow(ydx, ydy, "Y")
+        arrow(zdx, zdy, "Z")
+
+        imgui.win_draw_line(ox-4, oy, ox+4, oy, 1,1,1,1, 2)
+        imgui.win_draw_line(ox, oy-4, ox, oy+4, 1,1,1,1, 2)
+
+    elseif mode == "rotate" then
+        local function ring(ax, ay, az, axis_name)
+            local r,g,b,a = acol(axis_name)
+            local ux,uy,uz, vx,vy,vz
+            if math.abs(ax) < 0.9 then
+                ux,uy,uz = 1,0,0
+            else
+                ux,uy,uz = 0,1,0
+            end
+            local dot = ux*ax+uy*ay+uz*az
+            ux=ux-dot*ax; uy=uy-dot*ay; uz=uz-dot*az
+            local ul = math.sqrt(ux*ux+uy*uy+uz*uz)
+            if ul < 1e-6 then return end
+            ux=ux/ul; uy=uy/ul; uz=uz/ul
+            vx=ay*uz-az*uy; vy=az*ux-ax*uz; vz=ax*uy-ay*ux
+
+            local R = 0.6
+            local pts = {}
+            for i = 0, RING_SEGS do
+                local t = i * 2 * math.pi / RING_SEGS
+                local px = wx + (ux*math.cos(t) + vx*math.sin(t)) * R
+                local py = wy + (uy*math.cos(t) + vy*math.sin(t)) * R
+                local pz = wz + (uz*math.cos(t) + vz*math.sin(t)) * R
+                local sx2, sy2 = world_to_vp(px, py, pz)
+                if sx2 then pts[#pts+1] = {sx2, sy2} end
+            end
+            for i = 1, #pts - 1 do
+                imgui.win_draw_line(pts[i][1],pts[i][2],
+                                   pts[i+1][1],pts[i+1][2],
+                                   r,g,b,a, 2)
+            end
+        end
+        ring(1,0,0, "X")
+        ring(0,1,0, "Y")
+        ring(0,0,1, "Z")
+
+        imgui.win_draw_line(ox-4, oy, ox+4, oy, 1,1,1,0.9, 2)
+        imgui.win_draw_line(ox, oy-4, ox, oy+4, 1,1,1,0.9, 2)
+    end
+end
+
+local function gizmo_hit(bi, mx, my)
+    if not (cfg.mdl and cfg.last_world) then return nil end
+    local wx, wy, wz = bone_world_xyz(bi)
+    if not wx then return nil end
+    local ox, oy = world_to_vp(wx, wy, wz)
+    if not ox then return nil end
+
+    local mode = cfg.gizmo_mode
+
+    local function screen_dir(dX, dY, dZ)
+        local tip_wx = wx + dX * 0.5
+        local tip_wy = wy + dY * 0.5
+        local tip_wz = wz + dZ * 0.5
+        local tx, ty = world_to_vp(tip_wx, tip_wy, tip_wz)
+        if not tx then return 1, 0 end
+        local dx, dy = tx - ox, ty - oy
+        local l = math.sqrt(dx*dx + dy*dy)
+        if l < 0.5 then return 1, 0 end
+        return dx/l, dy/l
+    end
+
+    local xdx, xdy = screen_dir(1,0,0)
+    local ydx, ydy = screen_dir(0,1,0)
+    local zdx, zdy = screen_dir(0,0,1)
+
+    local function dist_to_arrow(ddx, ddy)
+        local L = GIZMO_LEN
+        local ex = ox + ddx*L
+        local ey = oy + ddy*L
+        local bx, by = ex-ox, ey-oy
+        local t = ((mx-ox)*bx + (my-oy)*by) / (bx*bx+by*by+1e-9)
+        t = math.max(0, math.min(1, t))
+        local px2 = ox+t*bx - mx
+        local py2 = oy+t*by - my
+        return math.sqrt(px2*px2+py2*py2), t
+    end
+
+    if mode == "move" or mode == "scale" then
+        local PLANE_SZ = GIZMO_LEN * 0.22
+        local function plane_hit(ax1x,ax1y, ax2x,ax2y)
+            local cx = ox + (ax1x + ax2x) * GIZMO_LEN * 0.32
+            local cy = oy + (ax1y + ax2y) * GIZMO_LEN * 0.32
+            return math.abs(mx-cx) < PLANE_SZ and math.abs(my-cy) < PLANE_SZ
+        end
+        if plane_hit(xdx,xdy, ydx,ydy) then return "XY" end
+        if plane_hit(xdx,xdy, zdx,zdy) then return "XZ" end
+        if plane_hit(ydx,ydy, zdx,zdy) then return "YZ" end
+
+        local dX, tX = dist_to_arrow(xdx, xdy)
+        local dY, tY = dist_to_arrow(ydx, ydy)
+        local dZ, tZ = dist_to_arrow(zdx, zdy)
+        if dX < GIZMO_SHAFT and tX > 0.05 then return "X" end
+        if dY < GIZMO_SHAFT and tY > 0.05 then return "Y" end
+        if dZ < GIZMO_SHAFT and tZ > 0.05 then return "Z" end
+
+    elseif mode == "rotate" then
+        local function ring_hit(ax, ay, az)
+            local ux,uy,uz
+            if math.abs(ax) < 0.9 then ux,uy,uz=1,0,0 else ux,uy,uz=0,1,0 end
+            local dot=ux*ax+uy*ay+uz*az
+            ux=ux-dot*ax; uy=uy-dot*ay; uz=uz-dot*az
+            local ul=math.sqrt(ux*ux+uy*uy+uz*uz)
+            if ul<1e-6 then return false end
+            ux=ux/ul; uy=uy/ul; uz=uz/ul
+            local vx=ay*uz-az*uy; vy=az*ux-ax*uz; vz=ax*uy-ay*ux
+
+            local R = 0.6
+            local minD = 1e9
+            for i = 0, 15 do
+                local t = i * 2 * math.pi / 16
+                local px = wx + (ux*math.cos(t)+vx*math.sin(t))*R
+                local py = wy + (uy*math.cos(t)+vy*math.sin(t))*R
+                local pz = wz + (uz*math.cos(t)+vz*math.sin(t))*R
+                local sx2, sy2 = world_to_vp(px, py, pz)
+                if sx2 then
+                    local dd = math.sqrt((sx2-mx)^2+(sy2-my)^2)
+                    if dd < minD then minD = dd end
+                end
+            end
+            return minD < 10
+        end
+        if ring_hit(1,0,0) then return "X" end
+        if ring_hit(0,1,0) then return "Y" end
+        if ring_hit(0,0,1) then return "Z" end
+    end
+    return nil
+end
+
+local function gizmo_apply_drag(bi, dx, dy)
+    if not cfg.bone_edit[bi] then reset_bone(bi) end
+    local ed  = cfg.bone_edit[bi]
+    local axis = cfg.gizmo_axis
+    local mode = cfg.gizmo_mode
+    local sens_move = 0.02
+    local sens_rot  = 0.9
+    local sens_scl  = 0.02
+
+-- [CONTINUA en la PARTE 3/5 de LolModel2.lua]
+===== END: LolModel2.lua (PARTE 2/5) =====

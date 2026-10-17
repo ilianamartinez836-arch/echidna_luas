@@ -1,0 +1,285 @@
+
+===== FILE: main_clean.lua (PARTE 1/2) =====
+-- @author: Capella
+-- @created: 30.05 10:08
+-- Echidna Script
+local ffi = require("ffi")
+ffi.cdef[[
+    int   SetDllDirectoryA(const char* lpPathName);
+    bool  init_video_player (void* dev, const char* path, int rw, int rh);
+    bool  is_frame_ready    (void);
+    void  update_video_frame(void);
+    void* get_video_texture_ptr(void);
+    void  shutdown_video_player(void);
+    void    player_seek             (double s);
+    void    player_seek_relative    (double s);
+    void    player_toggle_pause     (void);
+    void    player_set_pause        (bool p);
+    double  player_get_time         (void);
+    double  player_get_duration     (void);
+    bool    player_is_paused        (void);
+    int     player_get_chapter      (void);
+    int     player_get_chapter_count(void);
+    void    player_set_chapter      (int idx);
+    int     player_get_track_count  (void);
+    int     player_get_volume       (void);
+    void    player_set_volume       (int vol);
+    const char* player_get_property_string  (const char* name);
+    void        player_set_property_string  (const char* name, const char* val);
+    void        player_command_string       (const char* cmd);
+]]
+local BASE = "C:\\Echidna-L4d2\\"
+ffi.C.SetDllDirectoryA(BASE)
+local player = ffi.load(BASE .. "anime_player.dll")
+local VW, VH        = 640, 360
+local WW, WH        = 968, 598
+local FRAME_INTERVAL = 1 / 25
+local base_dir = [[F:\! ! ! !\Movies\[Beatrice-Raws] Re Zero - Season 2 - Starting Life in Another World [BDRip 1920x1080 HEVC TrueHD]\]]
+local anime_path = ""
+local inited        = false
+local last_tex      = nil
+local is_seeking    = false
+local seek_val      = 0.0
+local vol           = 100
+local chapters      = {}
+local sub_tr        = {}
+local aud_tr        = {}
+local meta_loaded   = false
+local view_mode      = "dashboard"
+local current_ep     = 14
+local selected_sub   = "None"
+local locked         = false
+local keep_aspect    = true
+local last_frame_t   = 0
+local sub_languages = {
+    "Arabic", "English", "French", "German", "Italian", "Portuguese", "Russian", "Spanish", "Spanish (Latin American)"
+}
+local THUMB_DIR      = BASE .. "thumbs\\"
+local THUMB_SEEK     = 45.0
+local THUMB_W, THUMB_H = 320, 180
+local thumb_tex    = {}
+local thumb_queue  = {}
+local thumb_queued = false
+local thumb_active = nil
+local thumb_phase  = 0
+local thumb_frames = 0
+local function get_ep_path(ep)
+    local path = string.format("%s[Beatrice-Raws] ReZero kara Hajimeru Isekai Seikatsu 2nd Season %d [BDRip 1920x1080 HEVC TrueHD].mkv", base_dir, ep)
+    return path:gsub("\\", "/")
+end
+local function get_sub_path(ep, lang)
+    local path = string.format("%sSub\\%s\\[Beatrice-Raws] ReZero kara Hajimeru Isekai Seikatsu 2nd Season %d [BDRip 1920x1080 HEVC TrueHD].ass", base_dir, lang, ep)
+    return path:gsub("\\", "/")
+end
+local function IC(r, g, b, a)
+    a = a or 255
+    return { r / 255, g / 255, b / 255, a / 255 }
+end
+local CG   = IC( 88,178,118)
+local CGH  = IC(110,210,148)
+local CGL  = IC( 50,110, 72, 180)
+local CGold= IC(200,165, 70)
+local CPN  = IC( 13, 13, 21, 250)
+local CBR  = IC( 38, 38, 54)
+local CWH  = IC(255,255,255)
+local CTX  = IC(225,225,235)
+local CTD  = IC(140,140,156, 200)
+local CBL  = IC(  8,  8, 14)
+local CDB  = IC( 26, 26, 26)
+local CDA  = IC( 13, 13, 13)
+local CDF  = IC( 51, 51, 51)
+local CTB  = IC(  0, 191, 255)
+local function pstr(k)
+    local p = player.player_get_property_string(k)
+    return p ~= nil and ffi.string(p) or ""
+end
+local function ftime(s)
+    s = math.max(0, math.floor(s + 0.5))
+    local h = math.floor(s / 3600); s = s - h * 3600
+    local m = math.floor(s /   60); s = s - m * 60
+    return h > 0 and ("%d:%02d:%02d"):format(h, m, s)
+               or   ("%d:%02d"):format(m, s)
+end
+local function thumb_file(ep)
+    return string.format("%sep%02d.png", THUMB_DIR, ep)
+end
+local function queue_thumbs()
+    if thumb_queued then return end
+    thumb_queued = true
+    os.execute('if not exist "' .. THUMB_DIR .. '" mkdir "' .. THUMB_DIR .. '"')
+    for ep = 14, 25 do
+        local f = io.open(thumb_file(ep), "rb")
+        if f then
+            f:close()
+            if client and client.load_texture then
+                thumb_tex[ep] = client.load_texture(thumb_file(ep))
+            end
+        else
+            table.insert(thumb_queue, ep)
+        end
+    end
+end
+local function process_thumb_gen()
+    if thumb_active then
+        if player.is_frame_ready() then player.update_video_frame() end
+        thumb_frames = thumb_frames + 1
+        if thumb_phase == 1 and thumb_frames >= 45 then
+            player.player_seek(THUMB_SEEK)
+            thumb_phase = 2; thumb_frames = 0
+        elseif thumb_phase == 2 and thumb_frames >= 90 then
+            local f = thumb_file(thumb_active):gsub("\\", "/")
+            player.player_command_string("screenshot-to-file " .. f .. " video")
+            thumb_phase = 3; thumb_frames = 0
+        elseif thumb_phase == 3 and thumb_frames >= 20 then
+            local ep = thumb_active
+            local fcheck = io.open(thumb_file(ep), "rb")
+            if fcheck then
+                fcheck:close()
+                if client and client.load_texture then
+                    thumb_tex[ep] = client.load_texture(thumb_file(ep))
+                end
+            else
+                thumb_tex[ep] = false
+            end
+            player.shutdown_video_player()
+            thumb_active = nil; thumb_phase = 0; thumb_frames = 0
+        end
+        return
+    end
+    if #thumb_queue == 0 then return end
+    local ep  = table.remove(thumb_queue, 1)
+    local dev = client.get_d3d9_device()
+    if not dev then table.insert(thumb_queue, 1, ep); return end
+    if player.init_video_player(dev, get_ep_path(ep), THUMB_W, THUMB_H) then
+        thumb_active = ep; thumb_phase = 1; thumb_frames = 0
+    else
+        thumb_tex[ep] = false
+    end
+end
+local function start()
+    local dev = client.get_d3d9_device()
+    if not dev then return end
+    if player.init_video_player(dev, anime_path, VW, VH) then
+        inited = true; meta_loaded = false
+        chapters = {}; sub_tr = {}; aud_tr = {}
+        vol = player.player_get_volume()
+        print("[Crusch-AnimeMedia] ready")
+    else
+        print("[Crusch-AnimeMedia] init_video_player failed")
+    end
+end
+local function change_episode(ep)
+    if ep < 14 or ep > 25 then return end
+    if thumb_active then
+        player.shutdown_video_player()
+        table.insert(thumb_queue, 1, thumb_active)
+        thumb_active = nil; thumb_phase = 0; thumb_frames = 0
+    end
+    current_ep = ep
+    anime_path = get_ep_path(ep)
+    inited = false
+    start()
+    if selected_sub ~= "None" then
+        local path = get_sub_path(current_ep, selected_sub)
+        player.player_set_property_string("sub-files", path)
+        player.player_set_property_string("sid", "ext1")
+    end
+end
+function on_key_down(key)
+    if not inited or view_mode ~= "player" or not client.is_menu_open() then return end
+    if key == 32 then
+        if not locked then player.player_toggle_pause() end
+    elseif key == 37 then
+        player.player_seek_relative(-10)
+    elseif key == 39 then
+        player.player_seek_relative(10)
+    elseif key == 38 then
+        vol = math.min(150, vol + 5)
+        player.player_set_volume(vol)
+    elseif key == 40 then
+        vol = math.max(0, vol - 5)
+        player.player_set_volume(vol)
+    end
+end
+function on_key_up(key)
+end
+local function load_meta()
+    if meta_loaded or player.player_get_duration() <= 0 then return end
+    local nc = player.player_get_chapter_count()
+    for i = 0, nc - 1 do
+        local t  = tonumber(pstr("chapter-list/"..i.."/time")) or 0
+        local tl = pstr("chapter-list/"..i.."/title")
+        table.insert(chapters, { title = tl ~= "" and tl or ("Ch "..(i+1)),
+                                 time  = t, idx = i })
+    end
+    local nt = player.player_get_track_count()
+    for i = 0, nt - 1 do
+        local tp = pstr("track-list/"..i.."/type")
+        local id = tonumber(pstr("track-list/"..i.."/id")) or 0
+        local lg = pstr("track-list/"..i.."/lang")
+        local tt = pstr("track-list/"..i.."/title")
+        local sl = pstr("track-list/"..i.."/selected") == "yes"
+        local lb = (tt ~= "" and tt) or (lg ~= "" and lg) or ("Track "..id)
+        if     tp == "sub"   then table.insert(sub_tr, {id=id,label=lb,sel=sl})
+        elseif tp == "audio" then table.insert(aud_tr, {id=id,label=lb,sel=sl})
+        end
+    end
+    meta_loaded = true
+end
+local function refresh_sel()
+    local nt = player.player_get_track_count()
+    for i = 0, nt - 1 do
+        local tp = pstr("track-list/"..i.."/type")
+        local id = tonumber(pstr("track-list/"..i.."/id")) or 0
+        local sl = pstr("track-list/"..i.."/selected") == "yes"
+        local tbl = (tp == "sub" and sub_tr) or (tp == "audio" and aud_tr)
+        if tbl then
+            for _, tr in ipairs(tbl) do
+                if tr.id == id then tr.sel = sl end
+            end
+        end
+    end
+end
+function on_end_scene()
+    local menu_open = client.is_menu_open()
+    if view_mode == "dashboard" then
+        queue_thumbs()
+        if menu_open then
+            process_thumb_gen()
+        else
+            return
+        end
+    else
+        if not inited then start(); return end
+        local now = client.get_time()
+        if (now - last_frame_t) >= FRAME_INTERVAL then
+            if player.is_frame_ready() then
+                player.update_video_frame()
+                local raw = player.get_video_texture_ptr()
+                last_tex  = (raw ~= nil) and client.tex_from_ptr(raw) or nil
+            end
+            last_frame_t = now
+        end
+        if not meta_loaded then load_meta() end
+    end
+    imgui.SetNextWindowSize(WW, WH, 4)
+    local wflags = 0
+    if locked or not menu_open then
+        wflags = wflags + 0x20
+        wflags = wflags + 0x40
+    end
+    if not menu_open then
+        wflags = wflags + 0x01
+        wflags = wflags + 0x08
+    end
+    if not imgui.Begin("Crusch-AnimeMedia", nil, wflags) then imgui.End(); return end
+    local dl = imgui.get_window_draw_list()
+    local wx, wy = imgui.GetWindowPos()
+    local ww, wh = imgui.GetWindowSize()
+    local fh     = menu_open and imgui.GetFrameHeight() or 0
+    dl:add_rect_filled(wx, wy + fh, wx + ww, wy + wh, CPN[1], CPN[2], CPN[3], CPN[4])
+    if view_mode == "dashboard" then
+        imgui.SetCursorScreenPos(wx + 20, wy + fh + 15)
+        imgui.TextColored(CGold[1], CGold[2], CGold[3], CGold[4], "SELECT EPISODE")
+-- [CONTINUA en la PARTE 2/2 de main_clean.lua]
+===== END: main_clean.lua (PARTE 1/2) =====

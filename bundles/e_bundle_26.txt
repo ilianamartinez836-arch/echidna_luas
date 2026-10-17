@@ -1,0 +1,308 @@
+
+===== FILE: modelagainyes.lua (PARTE 3/4) =====
+    if imgui.BeginCombo("##fbxpick", preview) then
+        for i, path in ipairs(cfg.fbx_list) do
+            local name = path:match("[/\\]([^/\\]+)$") or path
+            if imgui.Selectable(name .. "##fi" .. i, i == cfg.sel_idx) then
+                cfg.sel_idx = i
+            end
+        end
+        imgui.EndCombo()
+    end
+
+    imgui.Text("Texture Folder")
+    local nt, tc = imgui.InputText("##texdir", cfg.tex_folder)
+    if tc and nt then cfg.tex_folder = nt end
+
+    if imgui.Button("Load Model", 110, 26) then load_model() end
+
+    imgui.Spacing()
+    imgui.Separator()
+    imgui.Text("Camera")
+
+    local d,  dc  = imgui.SliderFloat("Distance##cv", cfg.cam_dist,  1.0, 60.0)
+    if dc  then cfg.cam_dist  = d  end
+    local ty, tc2 = imgui.SliderFloat("Target Y##cv", cfg.cam_ty,    0.0, 20.0)
+    if tc2 then cfg.cam_ty    = ty end
+
+    imgui.Separator()
+    imgui.Text("Transform")
+    local sc, scc = imgui.SliderFloat("Scale##cv",  cfg.mdl_scale, 0.01, 8.0)
+    if scc then cfg.mdl_scale = sc end
+    local yw, ywc = imgui.SliderFloat("Yaw##cv",    cfg.mdl_yaw,  -180,  180)
+    if ywc then cfg.mdl_yaw   = yw end
+
+    cfg.fake_aa = toggle_button("Fake Anti-Aim", "fake_aa")
+
+    imgui.Separator()
+    imgui.Text("Render Modes")
+    cfg.chams = toggle_button("Flat Chams", "chams")
+    if cfg.chams then
+        local vr, vg, vb, va, vc = imgui.ColorEdit4(
+            "Visible##cv",
+            cfg.vis[1], cfg.vis[2], cfg.vis[3], cfg.vis[4]
+        )
+        if vc then cfg.vis = { vr, vg, vb, va } end
+
+        local or_, og, ob, oa, oc = imgui.ColorEdit4(
+            "Occluded##cv",
+            cfg.occ[1], cfg.occ[2], cfg.occ[3], cfg.occ[4]
+        )
+        if oc then cfg.occ = { or_, og, ob, oa } end
+    end
+
+    cfg.shaded = toggle_button("Shaded Chams", "shaded")
+    if cfg.shaded then
+        local vr,vg,vb,va,vc = imgui.ColorEdit4("Vis##shcv",
+            cfg.sh_vis[1],cfg.sh_vis[2],cfg.sh_vis[3],cfg.sh_vis[4])
+        if vc then cfg.sh_vis = {vr,vg,vb,va} end
+        local or_,og,ob,oa,oc = imgui.ColorEdit4("Occ##shcv",
+            cfg.sh_occ[1],cfg.sh_occ[2],cfg.sh_occ[3],cfg.sh_occ[4])
+        if oc then cfg.sh_occ = {or_,og,ob,oa} end
+    end
+
+    cfg.outline = toggle_button("Outline", "outline")
+    if cfg.outline then
+        local r, g, b, a, cc = imgui.ColorEdit4(
+            "Color##olcv",
+            cfg.ol[1], cfg.ol[2], cfg.ol[3], cfg.ol[4]
+        )
+        if cc then cfg.ol = { r, g, b, a } end
+
+        local t, tc3 = imgui.SliderFloat("Thickness##olcv", cfg.ol_t, 1.01, 1.15)
+        if tc3 then cfg.ol_t = t end
+    end
+
+    cfg.glow = toggle_button("Glow", "glow")
+    if cfg.glow then
+        local r, g, b, a, cc = imgui.ColorEdit4(
+            "Color##glcv",
+            cfg.gl[1], cfg.gl[2], cfg.gl[3], cfg.gl[4]
+        )
+        if cc then cfg.gl = { r, g, b, a } end
+
+        local t, tc4 = imgui.SliderFloat("Thickness##glcv", cfg.gl_t, 1.01, 1.20)
+        if tc4 then cfg.gl_t = t end
+    end
+
+    cfg.textured = toggle_button("Textured", "textured")
+    if cfg.textured then
+        local a, ac = imgui.SliderFloat("Alpha##txcv", cfg.tex_alpha, 0.0, 1.0)
+        if ac then cfg.tex_alpha = a end
+    end
+
+    cfg.wire     = toggle_button("Wireframe", "wire")
+    cfg.skeleton = toggle_button("Skeleton", "skeleton")
+    if cfg.skeleton then
+        local br, bg, bb, ba, bc = imgui.ColorEdit4(
+            "Bone Color##bonecv",
+            cfg.bone_col[1], cfg.bone_col[2], cfg.bone_col[3], cfg.bone_col[4]
+        )
+        if bc then cfg.bone_col = { br, bg, bb, ba } end
+    end
+ cfg.bbox     = toggle_button("BBox", "bbox")
+
+    cfg.esp_box  = toggle_button("ESP Box (2D)", "esp_box")
+    if cfg.esp_box then
+        local r,g,b,a,cc = imgui.ColorEdit4("Color##espcv",
+            cfg.esp_col[1],cfg.esp_col[2],cfg.esp_col[3],cfg.esp_col[4])
+        if cc then cfg.esp_col = {r,g,b,a} end
+    end
+
+    if cfg.mdl and model.mesh_count(cfg.mdl) > 0 then
+        imgui.Spacing()
+        imgui.Separator()
+        if imgui.CollapsingHeader("Texture Swap##cv") then
+            imgui.Text("Path:")
+            local np, pc = imgui.InputText("##ctex", cfg.custom_tex_path)
+            if pc and np then cfg.custom_tex_path = np end
+            for i = 1, model.mesh_count(cfg.mdl) do
+                local name = model.mesh_name(cfg.mdl, i) or ("mesh "..i)
+                imgui.Text(string.format("[%d] %s", i, name))
+                imgui.SameLine()
+                if imgui.Button("Swap##ms"..i) and cfg.custom_tex_path ~= "" then
+                    local tex = client.load_texture(cfg.custom_tex_path)
+                    if tex then
+                        if cfg.tex_overrides[i] then
+                            client.release_texture(cfg.tex_overrides[i])
+                        end
+                        cfg.tex_overrides[i] = tex
+                        model.set_mesh_tex(cfg.mdl, i, tex)
+                    end
+                end
+                if cfg.tex_overrides[i] then
+                    imgui.SameLine()
+                    if imgui.Button("Reset##ms"..i) then
+                        client.release_texture(cfg.tex_overrides[i])
+                        cfg.tex_overrides[i] = nil
+                        model.set_mesh_tex(cfg.mdl, i, nil)
+                    end
+                end
+            end
+        end
+    end
+
+if cfg.mdl and model.bone_count(cfg.mdl) > 0 then
+    imgui.Spacing()
+    imgui.Separator()
+
+    local bc = model.bone_count(cfg.mdl)
+    ensure_bone_edit(cfg.mdl)
+
+    local be_label = string.format("%s  Bone Editor  [%d]",
+        bone_editor.open and "▼" or "▶", bc)
+    if imgui.Button(be_label, 220, 24) then
+        bone_editor.open = not bone_editor.open
+    end
+
+    if bone_editor.open then
+        bone_editor.selected = math.max(1, math.min(bone_editor.selected, bc))
+
+        imgui.Spacing()
+        local avail_w, _ = imgui.GetContentRegionAvail()
+        local list_w = math.floor(math.min(170, avail_w * 0.36))
+        local ctrl_w = avail_w - list_w - 12
+
+        imgui.BeginChild("##be_list", list_w, 230, true)
+        for i = 1, bc do
+            local _, _, _, parent = model.bone_pos(cfg.mdl, i)
+            local nm = model.bone_name(cfg.mdl, i) or ("Bone "..i)
+            local pfx = (parent >= 0) and "    └ " or "• "
+            local short = nm:len() > 14 and nm:sub(1,13).."…" or nm
+            local lbl = string.format("%s%s##be%d", pfx, short, i)
+            if imgui.Selectable(lbl, bone_editor.selected == i) then
+                bone_editor.selected = i
+            end
+        end
+        imgui.EndChild()
+
+        imgui.SameLine()
+
+        imgui.BeginChild("##be_ctrl", ctrl_w, 230, true)
+        local ed = cfg_bones.edit[bone_editor.selected]
+        local bx, by, bz, par = model.bone_pos(cfg.mdl, bone_editor.selected)
+        local nm = model.bone_name(cfg.mdl, bone_editor.selected) or ("Bone "..bone_editor.selected)
+
+        imgui.TextColored(0, 0.8, 1, 1, nm)
+        imgui.TextDisabled(string.format("#%d  parent: %d", bone_editor.selected, par))
+        imgui.TextDisabled(string.format("rest  %.2f  %.2f  %.2f", bx, by, bz))
+        imgui.Separator()
+
+        if ed then
+            imgui.Text("Position")
+            local px2, pc  = imgui.SliderFloat("X##bpx", ed[1], -5, 5)
+            if pc  then ed[1]=px2 end
+            local py2, pc2 = imgui.SliderFloat("Y##bpy", ed[2], -5, 5)
+            if pc2 then ed[2]=py2 end
+            local pz2, pc3 = imgui.SliderFloat("Z##bpz", ed[3], -5, 5)
+            if pc3 then ed[3]=pz2 end
+
+            imgui.Spacing()
+            imgui.Text("Rotation")
+            local rx, rc  = imgui.SliderFloat("X##brx", ed[4], -180, 180)
+            if rc  then ed[4]=rx end
+            local ry, rc2 = imgui.SliderFloat("Y##bry", ed[5], -180, 180)
+            if rc2 then ed[5]=ry end
+            local rz, rc3 = imgui.SliderFloat("Z##brz", ed[6], -180, 180)
+            if rc3 then ed[6]=rz end
+
+            model.bone_set_pose(cfg.mdl, bone_editor.selected,
+                ed[1],ed[2],ed[3], ed[4],ed[5],ed[6])
+        end
+        imgui.EndChild()
+
+        imgui.Spacing()
+        if imgui.Button("Reset Bone##ber", 120, 22) then
+            local i = bone_editor.selected
+            cfg_bones.edit[i] = {0,0,0,0,0,0}
+            model.bone_set_pose(cfg.mdl, i, 0,0,0,0,0,0)
+        end
+        imgui.SameLine()
+        if imgui.Button("Reset All##bera", 100, 22) then
+            for i = 1, bc do
+                cfg_bones.edit[i] = {0,0,0,0,0,0}
+                model.bone_set_pose(cfg.mdl, i, 0,0,0,0,0,0)
+            end
+        end
+        imgui.SameLine()
+        local show, sc = imgui.Checkbox("Joints##bej", ui.bone_joints)
+        if sc then ui.bone_joints = show end
+
+        imgui.Spacing()
+        if cfg.last_world and cfg.last_view and cfg.last_proj then
+            local wx,wy,wz = model.bone_world_pos(
+                cfg.mdl, cfg.last_world, bone_editor.selected)
+            if wx then
+                local sx, sy = model.project(
+                    cfg.last_view, cfg.last_proj, RT_W, RT_H, wx, wy, wz)
+                if sx then
+                    imgui.TextDisabled(string.format(
+                        "screen  %.0f, %.0f", sx, sy))
+                end
+            end
+        end
+    end
+end
+
+    if cfg.mdl and imgui.Button("Dump verts[1..3]##cv") then
+        local ptr, count = model.lock_verts(cfg.mdl, 1)
+        if ptr then
+            local v = ffi.cast("EchVertex*", ptr)
+            for i = 0, math.min(count-1, 2) do
+                client.log(string.format("v[%d] (%.3f,%.3f,%.3f) uv=(%.3f,%.3f)",
+                    i, v[i].x, v[i].y, v[i].z, v[i].u, v[i].v), 1)
+            end
+            model.unlock_verts(cfg.mdl, 1)
+        end
+    end
+    imgui.Spacing()
+imgui.Separator()
+imgui.Text("Occluder Model")
+
+imgui.Text("Occluder Folder")
+local of, ofc = imgui.InputText("##occdir", cfg.occ_folder)
+if ofc and of then cfg.occ_folder = of end
+imgui.SameLine()
+if imgui.Button("Scan##occ", 70, 22) then
+    scan_occ()
+end
+
+imgui.Text("Occluder File")
+local o_preview = (#cfg.occ_list > 0)
+    and (cfg.occ_list[cfg.occ_idx]:match("[/\\]([^/\\]+)$") or cfg.occ_list[cfg.occ_idx])
+    or "No occluder found"
+
+if imgui.BeginCombo("##occpick", o_preview) then
+    for i, path in ipairs(cfg.occ_list) do
+        local name = path:match("[/\\]([^/\\]+)$") or path
+        if imgui.Selectable(name .. "##occi" .. i, i == cfg.occ_idx) then
+            cfg.occ_idx = i
+        end
+    end
+    imgui.EndCombo()
+end
+
+-- [CONTINUA en la PARTE 4/4 de modelagainyes.lua]
+===== END: modelagainyes.lua (PARTE 3/4) =====
+
+===== FILE: modelagainyes.lua (PARTE 4/4) =====
+if imgui.Button("Load Occluder", 110, 26) then
+    load_occ()
+end
+
+imgui.SameLine()
+cfg.show_occ_debug = toggle_button("Show Occ Debug", "show_occ_debug")
+end)
+
+function on_unload()
+    for _, tex in pairs(cfg.tex_overrides) do
+        if tex then client.release_texture(tex) end
+    end
+ if cfg.mdl then model.free(cfg.mdl);  cfg.mdl = nil end
+if cfg.occ_mdl then model.free(cfg.occ_mdl); cfg.occ_mdl = nil end
+if cfg.rt  then model.free_rt(cfg.rt); cfg.rt  = nil end
+mdl_normal_cache = {}
+cfg_bones.edit = {}
+menu.remove_tab("chams_viewer")
+end
+===== END: modelagainyes.lua (PARTE 4/4) =====

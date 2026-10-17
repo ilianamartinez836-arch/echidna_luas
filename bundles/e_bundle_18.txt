@@ -1,0 +1,302 @@
+
+===== FILE: LolModel2.lua (PARTE 3/5) =====
+    if mode == "move" then
+        if axis == "X"  then ed[1] = cfg.gizmo_bone_origin[1] + dx * sens_move end
+        if axis == "Y"  then ed[2] = cfg.gizmo_bone_origin[2] - dy * sens_move end
+        if axis == "Z"  then ed[3] = cfg.gizmo_bone_origin[3] + dx * sens_move end
+        if axis == "XY" then
+            ed[1] = cfg.gizmo_bone_origin[1] + dx * sens_move
+            ed[2] = cfg.gizmo_bone_origin[2] - dy * sens_move
+        end
+        if axis == "XZ" then
+            ed[1] = cfg.gizmo_bone_origin[1] + dx * sens_move
+            ed[3] = cfg.gizmo_bone_origin[3] - dy * sens_move
+        end
+        if axis == "YZ" then
+            ed[2] = cfg.gizmo_bone_origin[2] - dy * sens_move
+            ed[3] = cfg.gizmo_bone_origin[3] + dx * sens_move
+        end
+    elseif mode == "rotate" then
+        local delta = (math.abs(dx) > math.abs(dy)) and dx or -dy
+        if axis == "X" then ed[4] = cfg.gizmo_bone_origin[4] + delta * sens_rot end
+        if axis == "Y" then ed[5] = cfg.gizmo_bone_origin[5] + delta * sens_rot end
+        if axis == "Z" then ed[6] = cfg.gizmo_bone_origin[6] + delta * sens_rot end
+    elseif mode == "scale" then
+        local delta = (math.abs(dx) > math.abs(dy)) and dx or -dy
+        if axis == "X"  then ed[1] = cfg.gizmo_bone_origin[1] + delta * sens_scl end
+        if axis == "Y"  then ed[2] = cfg.gizmo_bone_origin[2] + delta * sens_scl end
+        if axis == "Z"  then ed[3] = cfg.gizmo_bone_origin[3] + delta * sens_scl end
+        if axis == "XY" or axis == "XZ" or axis == "YZ" then
+            local s = delta * sens_scl
+            ed[1] = cfg.gizmo_bone_origin[1] + s
+            ed[2] = cfg.gizmo_bone_origin[2] + s
+            ed[3] = cfg.gizmo_bone_origin[3] + s
+        end
+    end
+    model.bone_set_pose(cfg.mdl, bi, ed[1],ed[2],ed[3],ed[4],ed[5],ed[6])
+end
+
+local function tbtn(label, val, w, h)
+    local lbl = val and ("[" .. label .. "]") or (" " .. label .. " ")
+    return imgui.Button(lbl .. "##t_" .. label, w or 120, h or 20)
+end
+
+local function ui_outliner_meshes(panel_w)
+    if not cfg.mdl then imgui.TextDisabled("No model loaded"); return end
+    local mc = model.mesh_count(cfg.mdl)
+
+    imgui.Text(mc .. " meshes")
+    if imgui.Button("All##msa", 38, 18) then
+        for i = 1, mc do
+            cfg.mesh_visible[i] = true
+            model.set_mesh_visible(cfg.mdl, i, true)
+        end
+    end
+    imgui.SameLine()
+    if imgui.Button("None##msn", 45, 18) then
+        for i = 1, mc do
+            cfg.mesh_visible[i] = false
+            model.set_mesh_visible(cfg.mdl, i, false)
+        end
+    end
+    imgui.Separator()
+
+    for i = 1, mc do
+        local vis   = cfg.mesh_visible[i] ~= false
+        local nm    = model.mesh_name(cfg.mdl, i) or ("Mesh " .. i)
+        local maxch = math.max(1, panel_w / 7 - 6)
+        local short = nm:len() > maxch and nm:sub(1, maxch - 1) .. "…" or nm
+
+        local eye = vis and "O##ve" .. i or "-##ve" .. i
+        if imgui.Button(eye, 20, 18) then
+            cfg.mesh_visible[i] = not vis
+            model.set_mesh_visible(cfg.mdl, i, not vis)
+        end
+        imgui.SameLine()
+
+        local is_sel = (cfg.selected_mesh == i)
+        if imgui.Selectable(short .. "##ms" .. i, is_sel) then
+            cfg.selected_mesh = is_sel and 0 or i
+            cfg.prop_tab = "mesh"
+        end
+
+        if cfg.tex_overrides[i] then
+            imgui.SameLine()
+            imgui.TextDisabled("T")
+        end
+    end
+end
+
+local function ui_outliner_bones(panel_w)
+    if not cfg.mdl then imgui.TextDisabled("No model loaded"); return end
+    local bc = model.bone_count(cfg.mdl)
+    if bc == 0 then imgui.TextDisabled("No bones"); return end
+
+    imgui.Text(bc .. " bones")
+    imgui.Separator()
+
+    local children = {}
+    for i = 1, bc do children[i] = {} end
+    local roots = {}
+    for i = 1, bc do
+        local _,_,_,par = model.bone_pos(cfg.mdl, i)
+        if par < 0 then
+            roots[#roots + 1] = i
+        else
+            local pi = par + 1
+            if pi >= 1 and pi <= bc then
+                children[pi][#children[pi] + 1] = i
+            else
+                roots[#roots + 1] = i
+            end
+        end
+    end
+
+    local max_name_chars = math.max(1, panel_w / 7)
+    local function draw_tree(bi, depth)
+        if not cfg.bone_edit[bi] then reset_bone(bi) end
+        local nm    = model.bone_name(cfg.mdl, bi) or ("Bone " .. bi)
+        local mc2   = math.max(1, max_name_chars - depth * 2)
+        local short = nm:len() > mc2 and nm:sub(1, mc2 - 1) .. "…" or nm
+        local indent = string.rep("  ", depth)
+        local hch  = #children[bi] > 0
+        local pfx   = indent .. (hch and "+ " or "  ")
+
+        local ed   = cfg.bone_edit[bi]
+        local mod  = ed and (ed[1]~=0 or ed[2]~=0 or ed[3]~=0 or
+                              ed[4]~=0 or ed[5]~=0 or ed[6]~=0)
+        local lbl  = pfx .. short .. (mod and " *" or "") .. "##bo" .. bi
+        local isel = (cfg.selected_bone == bi)
+
+        if imgui.Selectable(lbl, isel) then
+            cfg.selected_bone = isel and 0 or bi
+            cfg.prop_tab = "bone"
+        end
+
+        for _, ch in ipairs(children[bi]) do
+            draw_tree(ch, depth + 1)
+        end
+    end
+
+    for _, r in ipairs(roots) do
+        draw_tree(r, 0)
+    end
+end
+
+local function ui_prop_bone(pw)
+    if not cfg.mdl then return end
+    local bc = model.bone_count(cfg.mdl)
+
+    if cfg.selected_bone == 0 or cfg.selected_bone > bc then
+        imgui.TextDisabled("Select a bone in")
+        imgui.TextDisabled("the Outliner (Bones)")
+        imgui.Spacing()
+        if tbtn("Show Skeleton", cfg.r_skeleton, pw - 14, 22) then
+            cfg.r_skeleton = not cfg.r_skeleton
+        end
+        return
+    end
+
+    local bi  = cfg.selected_bone
+    local nm  = model.bone_name(cfg.mdl, bi) or ("Bone " .. bi)
+    local bx, by, bz, par = model.bone_pos(cfg.mdl, bi)
+
+    imgui.TextColored(1, 0.85, 0.2, 1, nm)
+    imgui.TextDisabled(string.format("#%d  parent: %d", bi, par))
+    imgui.TextDisabled(string.format("rest  %.3f  %.3f  %.3f", bx, by, bz))
+    imgui.Separator()
+
+    if not cfg.bone_edit[bi] then reset_bone(bi) end
+    local ed  = cfg.bone_edit[bi]
+    local chg = false
+    local v, c
+
+    imgui.Text("Location  (parent-local)")
+    imgui.PushItemWidth(pw - 14)
+    v,c = imgui.SliderFloat("LX##bpx", ed[1], -10, 10); if c then ed[1]=v; chg=true end
+    v,c = imgui.SliderFloat("LY##bpy", ed[2], -10, 10); if c then ed[2]=v; chg=true end
+    v,c = imgui.SliderFloat("LZ##bpz", ed[3], -10, 10); if c then ed[3]=v; chg=true end
+
+    imgui.Spacing()
+    imgui.Text("Rotation  (degrees)")
+    v,c = imgui.SliderFloat("RX##brx", ed[4], -180, 180); if c then ed[4]=v; chg=true end
+    v,c = imgui.SliderFloat("RY##bry", ed[5], -180, 180); if c then ed[5]=v; chg=true end
+    v,c = imgui.SliderFloat("RZ##brz", ed[6], -180, 180); if c then ed[6]=v; chg=true end
+    imgui.PopItemWidth()
+
+    if chg then
+        model.bone_set_pose(cfg.mdl, bi, ed[1], ed[2], ed[3], ed[4], ed[5], ed[6])
+    end
+
+    imgui.Spacing()
+    if imgui.Button("Reset Bone##bpr", 95, 22) then
+        reset_bone(bi)
+        model.bone_set_pose(cfg.mdl, bi, 0,0,0,0,0,0)
+    end
+    imgui.SameLine()
+    if imgui.Button("Reset All##bpra", 90, 22) then
+        for i = 1, bc do
+            reset_bone(i)
+            model.bone_set_pose(cfg.mdl, i, 0,0,0,0,0,0)
+        end
+    end
+
+    imgui.Spacing()
+    imgui.Separator()
+    if tbtn("Show Skeleton", cfg.r_skeleton, pw - 14, 22) then
+        cfg.r_skeleton = not cfg.r_skeleton
+    end
+
+    if cfg.last_world and cfg.last_view and cfg.last_proj then
+        local wx, wy, wz = model.bone_world_pos(cfg.mdl, cfg.last_world, bi)
+        if wx then
+            local sx, sy = model.project(cfg.last_view, cfg.last_proj, RT_W, RT_H, wx, wy, wz)
+            if sx then
+                imgui.Spacing()
+                imgui.TextDisabled(string.format("screen  %.0f, %.0f", sx, sy))
+            end
+        end
+    end
+end
+
+local function ui_prop_mesh(pw)
+    if not cfg.mdl then return end
+    local mc = model.mesh_count(cfg.mdl)
+
+    if cfg.selected_mesh == 0 or cfg.selected_mesh > mc then
+        imgui.TextDisabled("Select a mesh in")
+        imgui.TextDisabled("the Outliner (Meshes)")
+        return
+    end
+
+    local i   = cfg.selected_mesh
+    local nm  = model.mesh_name(cfg.mdl, i) or ("Mesh " .. i)
+    local vc  = model.mesh_vert_count(cfg.mdl, i)
+    local tc  = model.mesh_tri_count(cfg.mdl, i)
+
+    imgui.TextColored(0.4, 0.85, 1, 1, nm)
+    imgui.TextDisabled(vc .. " verts   " .. tc .. " tris")
+    imgui.Separator()
+
+    local vis = cfg.mesh_visible[i] ~= false
+    local vlbl = vis and "Visible##mvt" or "Hidden##mvt"
+    if imgui.Button(vlbl, pw - 14, 22) then
+        cfg.mesh_visible[i] = not vis
+        model.set_mesh_visible(cfg.mdl, i, not vis)
+    end
+
+    imgui.Spacing()
+    imgui.Separator()
+    imgui.Text("Texture override")
+    imgui.PushItemWidth(pw - 14)
+    local np, pc = imgui.InputText("##ctex_mi", cfg.custom_tex_path)
+    if pc and np then cfg.custom_tex_path = np end
+    imgui.PopItemWidth()
+
+    if imgui.Button("Apply##ta", 56, 20) and cfg.custom_tex_path ~= "" then
+        local tex = client.load_texture(cfg.custom_tex_path)
+        if tex then
+            if cfg.tex_overrides[i] then client.release_texture(cfg.tex_overrides[i]) end
+            cfg.tex_overrides[i] = tex
+            model.set_mesh_tex(cfg.mdl, i, tex)
+        end
+    end
+
+    if cfg.tex_overrides[i] then
+        imgui.SameLine()
+        if imgui.Button("Clear##tc", 48, 20) then
+            client.release_texture(cfg.tex_overrides[i])
+            cfg.tex_overrides[i] = nil
+            model.set_mesh_tex(cfg.mdl, i, nil)
+        end
+    end
+end
+
+local function ui_prop_render(pw)
+    local bw = pw - 14
+
+    imgui.Text("Render modes")
+    imgui.Separator()
+
+    local function rmb(lbl, key)
+        if tbtn(lbl, cfg[key], bw, 20) then cfg[key] = not cfg[key] end
+    end
+    rmb("Textured",   "r_textured")
+    rmb("Flat Chams", "r_chams")
+    rmb("Wireframe",  "r_wire")
+    rmb("Outline",    "r_outline")
+    rmb("Glow",       "r_glow")
+    rmb("Skeleton",   "r_skeleton")
+    rmb("BBox",       "r_bbox")
+    rmb("ESP 2D",     "r_esp")
+    rmb("Auto-Rotate","r_autorot")
+
+    imgui.Spacing()
+    imgui.Separator()
+    imgui.Text("Chams — Visible")
+    local vr,vg,vb,va,vc = imgui.ColorEdit4("##vcc",
+        cfg.vis_col[1], cfg.vis_col[2], cfg.vis_col[3], cfg.vis_col[4])
+    if vc then cfg.vis_col = {vr,vg,vb,va} end
+
+-- [CONTINUA en la PARTE 4/5 de LolModel2.lua]
+===== END: LolModel2.lua (PARTE 3/5) =====

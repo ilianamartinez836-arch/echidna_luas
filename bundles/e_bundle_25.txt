@@ -1,0 +1,297 @@
+
+===== FILE: modelagainyes.lua (PARTE 2/4) =====
+    local path = cfg.occ_list[cfg.occ_idx]
+    local m, err = model.load(path, cfg.tex_folder)
+    if m then
+        cfg.occ_mdl = m
+        client.log(string.format("[occ] loaded %s | %dm %db",
+            path, model.mesh_count(m), model.bone_count(m)), 1)
+    else
+        client.log("[occ] " .. (err or "?"), 3)
+    end
+end
+local function toggle_button(label, key)
+    local state = ui[key]
+    if imgui.Button(string.format("%s: %s", label, state and "ON" or "OFF"), 180, 22) then
+        ui[key] = not state
+    end
+    return ui[key]
+end
+local function ensure_bone_edit(mdl)
+    local bc = model.bone_count(mdl)
+    for i = 1, bc do
+        if not cfg_bones.edit[i] then
+            cfg_bones.edit[i] = { 0, 0, 0, 0, 0, 0 }
+        end
+    end
+end
+
+local function clamp_bone_idx(mdl)
+    local bc = model.bone_count(mdl)
+    if bc <= 0 then
+        cfg_bones.sel_idx = 1
+        return 0
+    end
+    cfg_bones.sel_idx = math.max(1, math.min(cfg_bones.sel_idx, bc))
+    return bc
+end
+local function scan()
+    cfg.fbx_list = model.scan_fbx(cfg.fbx_folder)
+end
+
+local function load_model()
+    if cfg.mdl then model.free(cfg.mdl); cfg.mdl = nil end
+    cfg.tex_overrides = {}
+    if cfg.sel_idx < 1 or cfg.sel_idx > #cfg.fbx_list then return end
+    local path = cfg.fbx_list[cfg.sel_idx]
+    local m, err = model.load(path, cfg.tex_folder)
+    if m then
+        cfg.mdl = m
+        cache_normals(m)
+        client.log(string.format("[chams] loaded %s | %dm %db",
+            path, model.mesh_count(m), model.bone_count(m)), 1)
+        
+        for i = 1, model.mesh_count(m) do
+            local mat_name = model.mesh_name(m, i)
+            if mat_name then
+                local tex_base_name = mat_name:gsub("^mt_", "tx_") .. "_Base.tga"
+                local full_tex_path = cfg.tex_folder .. "\\" .. tex_base_name
+                
+                local tex = client.load_texture(full_tex_path)
+                if tex then
+                    cfg.tex_overrides[i] = tex
+                    model.set_mesh_tex(m, i, tex)
+                end
+            end
+        end
+    else
+        client.log("[chams] " .. (err or "?"), 3)
+    end
+end
+
+cfg.rt = model.create_rt(RT_W, RT_H)
+if not cfg.rt then
+    client.log("[chams] failed to create render target", 3)
+end
+
+scan()
+scan_occ()
+
+if #cfg.fbx_list > 0 then load_model() end
+if #cfg.occ_list > 0 then load_occ() end
+
+function on_render_3d()
+    if not cfg.mdl or not cfg.rt then return end
+
+    model.apply_skinning(cfg.mdl)
+
+    local dt = client.get_frametime()
+
+    if cfg.fake_aa then
+        cfg.fake_yaw = (cfg.fake_yaw + dt * 360.0) % 360.0
+        cfg.mdl_yaw  = cfg.fake_yaw - 180.0
+    end
+
+    model.begin_rt(cfg.rt)
+
+    local cp, cy  = cfg.cam_pitch, cfg.cam_yaw
+    local cd, cty = cfg.cam_dist,  cfg.cam_ty
+    local ctx = cfg.cam_tx or 0.0
+    local ctz = cfg.cam_tz or 0.0
+
+    local ey = cty + cd * math.sin(cp)
+    local ex = ctx + cd * math.cos(cp) * math.sin(cy)
+    local ez = ctz - cd * math.cos(cp) * math.cos(cy)
+
+    local view = model.mat_lookat_lh(ex, ey, ez, ctx, cty, ctz)
+    local proj = model.mat_persp_lh(0.8, RT_W / RT_H, 0.1, 1000.0)
+    model.set_view(view)
+    model.set_proj(proj)
+
+local yr    = cfg.mdl_yaw * math.pi / 180.0
+    local world = model.mat_mul(model.mat_scale(cfg.mdl_scale), model.mat_roty(yr))
+    cfg.last_world = world   
+    cfg.last_view  = view
+    cfg.last_proj  = proj
+
+local v, o, ol, gl = cfg.vis, cfg.occ, cfg.ol, cfg.gl
+if cfg.occ_mdl and cfg.show_occ_debug then
+    model.rs(model.RS_LIGHTING, 0)
+    model.rs(model.RS_ALPHABLENDENABLE, 0)
+    model.rs(model.RS_ZENABLE, 1)
+    model.rs(model.RS_ZWRITEENABLE, 1)
+    model.rs(model.RS_ZFUNC, model.CMP_LESSEQUAL)
+    model.rs(model.RS_CULLMODE, model.CULL_CCW)
+    model.texture(0, nil)
+    model.tss(0, model.TSS_COLOROP, model.TOP_SELECTARG2)
+    model.tss(0, model.TSS_COLORARG2, model.TA_DIFFUSE)
+    model.tss(0, model.TSS_ALPHAOP, model.TOP_SELECTARG2)
+    model.tss(0, model.TSS_ALPHAARG2, model.TA_DIFFUSE)
+    model.fvf(model.VERTEX_FVF)
+
+    local xx_world = model.mat_mul(model.mat_scale(1.0), model.mat_roty(0.0))
+    model.set_world(xx_world)
+
+    model.render_chams(cfg.occ_mdl, xx_world, 0.7, 0.7, 0.7, 1.0, 0.7, 0.7, 0.7, 1.0)
+end
+
+if ui.outline then
+    model.render_outline(cfg.mdl, world, ol[1],ol[2],ol[3],ol[4], cfg.ol_t)
+end
+if ui.glow then
+    model.render_glow(cfg.mdl, world, gl[1],gl[2],gl[3],gl[4], cfg.gl_t)
+end
+if ui.chams then
+    model.render_chams(cfg.mdl, world, v[1],v[2],v[3],v[4], o[1],o[2],o[3],o[4])
+end
+if ui.shaded then
+    local sv = cfg.sh_vis
+    render_shaded_opaque(cfg.mdl, world, yr, sv[1], sv[2], sv[3], sv[4])
+end
+    if ui.textured then
+        model.rs(model.RS_ZFUNC, 8)
+        model.render_textured(cfg.mdl, world, cfg.tex_alpha)
+        model.rs(model.RS_ZFUNC, model.CMP_LESSEQUAL)
+    end
+
+    if ui.wire then
+        model.rs(model.RS_ZFUNC, 8)
+        model.render_wireframe(cfg.mdl, world, 0, 1, 0, 1)
+        model.rs(model.RS_ZFUNC, model.CMP_LESSEQUAL)
+    end
+
+    if ui.skeleton then
+        local bc = cfg.bone_col or {0.0, 1.0, 0.0, 1.0}
+        model.render_skeleton(cfg.mdl, world, bc[1], bc[2], bc[3], bc[4])
+        if ui.bone_joints then
+            model.render_bone_joints(cfg.mdl, world, 1, 1, 0, 1)
+        end
+    end
+    if ui.bbox     then model.render_bbox    (cfg.mdl, world, 0, 1, 1, 1) end
+
+    model.end_rt(cfg.rt)
+end
+
+menu.add_tab("chams_viewer", "Chams Viewer", "I", function()
+    imgui.Spacing()
+    imgui.Separator()
+    imgui.Spacing()
+
+    if cfg.rt then
+        local avail_w, _ = imgui.GetContentRegionAvail()
+        local vw = math.min(avail_w - 8, RT_W)
+        local vh = vw * (RT_H / RT_W)
+
+        local px, py = imgui.GetCursorScreenPos()
+
+        imgui.InvisibleButton("##vp3d", vw, vh)
+
+        local tex = model.rt_tex(cfg.rt)
+        if tex then
+            model.imgui_image(tex, px, py, px + vw, py + vh)
+        end
+
+        imgui.win_draw_rect(px, py, px + vw, py + vh, 0.3, 0.3, 0.4, 0.8, 1)
+
+    if ui.esp_box and cfg.mdl and cfg.last_world and cfg.last_view and cfg.last_proj then
+            local x1, y1, x2, y2 = model.bbox_screen(
+                cfg.mdl, cfg.last_world, cfg.last_view, cfg.last_proj, RT_W, RT_H)
+            if x1 then
+                x1 = math.max(0, math.min(RT_W, x1))
+                y1 = math.max(0, math.min(RT_H, y1))
+                x2 = math.max(0, math.min(RT_W, x2))
+                y2 = math.max(0, math.min(RT_H, y2))
+                if x2 - x1 < 2 or y2 - y1 < 2 then goto skip_esp end
+                local sx = vw / RT_W
+                local sy = vh / RT_H
+                local ec = cfg.esp_col
+                imgui.win_draw_rect(px+x1*sx, py+y1*sy, px+x2*sx, py+y2*sy,
+                    ec[1], ec[2], ec[3], ec[4], 1.5, 2)
+                local cw = (x2-x1)*sx*0.18
+                local ch = (y2-y1)*sy*0.18
+                local lx1,ly1,lx2,ly2 = px+x1*sx, py+y1*sy, px+x2*sx, py+y2*sy
+                imgui.win_draw_line(lx1,ly1, lx1+cw,ly1, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx1,ly1, lx1,ly1+ch, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx2,ly1, lx2-cw,ly1, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx2,ly1, lx2,ly1+ch, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx1,ly2, lx1+cw,ly2, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx1,ly2, lx1,ly2-ch, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx2,ly2, lx2-cw,ly2, ec[1],ec[2],ec[3],ec[4],2)
+                imgui.win_draw_line(lx2,ly2, lx2,ly2-ch, ec[1],ec[2],ec[3],ec[4],2)
+                     ::skip_esp::
+            end
+        end
+    if imgui.IsItemHovered() then
+            if imgui.IsMouseDragging(0) then
+                local dx, dy = imgui.GetMouseDragDelta(0, 0)
+                imgui.ResetMouseDragDelta(0)
+                cfg.cam_yaw  = cfg.cam_yaw + dx * 0.005
+                cfg.cam_pitch = math.max(-1.5, math.min(1.5,
+                    cfg.cam_pitch - dy * 0.005))
+            end
+
+            local drag_btn = imgui.IsMouseDragging(1) and 1 or (imgui.IsMouseDragging(2) and 2 or nil)
+            if drag_btn then
+                local dx, dy = imgui.GetMouseDragDelta(drag_btn, 0)
+                imgui.ResetMouseDragDelta(drag_btn)
+                
+                local factor = cfg.cam_dist * 0.0015 
+                cfg.cam_ty = cfg.cam_ty + dy * factor
+                cfg.cam_tx = (cfg.cam_tx or 0.0) - dx * math.cos(cfg.cam_yaw) * factor
+                cfg.cam_tz = (cfg.cam_tz or 0.0) - dx * math.sin(cfg.cam_yaw) * factor
+            end
+
+            local current_scroll = (imgui.GetScrollY or imgui.get_scroll_y or function() end)()
+            local arrow_active = false
+            
+            local arrow_speed = 25.0 * client.get_frametime()
+            local is_key_down = imgui.IsKeyDown or imgui.is_key_down
+
+            if is_key_down and is_key_down(38) then -- Arrow Up (Zoom In)
+                cfg.cam_dist = math.max(1.0, cfg.cam_dist - arrow_speed)
+                arrow_active = true
+            end
+            if is_key_down and is_key_down(40) then -- Arrow Down (Zoom Out)
+                cfg.cam_dist = math.max(1.0, cfg.cam_dist + arrow_speed)
+                arrow_active = true
+            end
+
+            if arrow_active and current_scroll then
+                local set_scroll = imgui.SetScrollY or imgui.set_scroll_y
+                if set_scroll then set_scroll(current_scroll) end
+            end
+
+            local wheel = model.imgui_wheel()
+            if wheel ~= 0 then
+                cfg.cam_dist = math.max(1.0, cfg.cam_dist - wheel * 0.5)
+                model.consume_wheel()  
+            end
+        end
+
+        if cfg.mdl then
+            imgui.win_draw_text(px + 6, py + 4, 0.5, 1, 0.5, 0.8,
+                string.format("%dm %db  dist=%.1f",
+                    model.mesh_count(cfg.mdl),
+                    model.bone_count(cfg.mdl),
+                    cfg.cam_dist), 11)
+        end
+
+        imgui.Spacing()
+    end
+
+    imgui.Separator()
+    imgui.Spacing()
+
+    imgui.Text("FBX Folder")
+    local nf, fc = imgui.InputText("##fbxdir", cfg.fbx_folder)
+    if fc and nf then cfg.fbx_folder = nf end
+    imgui.SameLine()
+    if imgui.Button("Scan", 70, 22) then scan() end
+
+    imgui.Text("FBX File")
+    local preview = (#cfg.fbx_list > 0)
+        and (cfg.fbx_list[cfg.sel_idx]:match("[/\\]([^/\\]+)$") or cfg.fbx_list[cfg.sel_idx])
+        or  "No files found"
+
+-- [CONTINUA en la PARTE 3/4 de modelagainyes.lua]
+===== END: modelagainyes.lua (PARTE 2/4) =====

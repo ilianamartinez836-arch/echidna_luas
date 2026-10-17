@@ -1,0 +1,296 @@
+
+===== FILE: LolModel2.lua (PARTE 4/5) =====
+    imgui.Text("Chams — Occluded")
+    local or_,og,ob,oa,oc = imgui.ColorEdit4("##occ2",
+        cfg.occ_col[1], cfg.occ_col[2], cfg.occ_col[3], cfg.occ_col[4])
+    if oc then cfg.occ_col = {or_,og,ob,oa} end
+
+    imgui.Spacing()
+    imgui.Text("Outline")
+    local r,g,b,a,cc = imgui.ColorEdit4("##olc",
+        cfg.ol_col[1], cfg.ol_col[2], cfg.ol_col[3], cfg.ol_col[4])
+    if cc then cfg.ol_col = {r,g,b,a} end
+    imgui.PushItemWidth(bw)
+    local t, tc2 = imgui.SliderFloat("Thick##olt", cfg.ol_thick, 1.01, 1.20)
+    if tc2 then cfg.ol_thick = t end
+
+    imgui.Spacing()
+    imgui.Text("Glow")
+    local r2,g2,b2,a2,cc2 = imgui.ColorEdit4("##glc",
+        cfg.gl_col[1], cfg.gl_col[2], cfg.gl_col[3], cfg.gl_col[4])
+    if cc2 then cfg.gl_col = {r2,g2,b2,a2} end
+    local t2, tc3 = imgui.SliderFloat("Thick##glt", cfg.gl_thick, 1.01, 1.20)
+    if tc3 then cfg.gl_thick = t2 end
+
+    imgui.Spacing()
+    imgui.Text("Texture alpha")
+    local al, alc = imgui.SliderFloat("##ta", cfg.tex_alpha, 0.0, 1.0)
+    if alc then cfg.tex_alpha = al end
+
+    imgui.Spacing()
+    imgui.Text("ESP color")
+    local er,eg,eb,ea,ecc = imgui.ColorEdit4("##espc",
+        cfg.esp_col[1], cfg.esp_col[2], cfg.esp_col[3], cfg.esp_col[4])
+    if ecc then cfg.esp_col = {er,eg,eb,ea} end
+    imgui.PopItemWidth()
+end
+
+local function draw_esp_overlay(px, py, vpw, vph)
+    if not (cfg.r_esp and cfg.mdl and cfg.last_world and cfg.last_view and cfg.last_proj) then
+        return
+    end
+    local bx1,by1,bx2,by2 = model.bbox_screen(
+        cfg.mdl, cfg.last_world, cfg.last_view, cfg.last_proj, RT_W, RT_H)
+    if not bx1 then return end
+
+    local sx = vpw / RT_W
+    local sy = vph / RT_H
+    bx1 = math.max(0, math.min(RT_W, bx1)) * sx
+    by1 = math.max(0, math.min(RT_H, by1)) * sy
+    bx2 = math.max(0, math.min(RT_W, bx2)) * sx
+    by2 = math.max(0, math.min(RT_H, by2)) * sy
+
+    if bx2 - bx1 < 2 or by2 - by1 < 2 then return end
+
+    local ec = cfg.esp_col
+    local lx1,ly1,lx2,ly2 = px+bx1, py+by1, px+bx2, py+by2
+    imgui.win_draw_rect(lx1,ly1, lx2,ly2, ec[1],ec[2],ec[3],ec[4], 1.5, 2)
+
+    local cw = (bx2-bx1)*0.18
+    local ch = (by2-by1)*0.18
+    local function cl(ax,ay, bxx,byy)
+        imgui.win_draw_line(ax,ay, bxx,byy, ec[1],ec[2],ec[3],ec[4], 2)
+    end
+    cl(lx1,ly1, lx1+cw,ly1); cl(lx1,ly1, lx1,ly1+ch)
+    cl(lx2,ly1, lx2-cw,ly1); cl(lx2,ly1, lx2,ly1+ch)
+    cl(lx1,ly2, lx1+cw,ly2); cl(lx1,ly2, lx1,ly2-ch)
+    cl(lx2,ly2, lx2-cw,ly2); cl(lx2,ly2, lx2,ly2-ch)
+end
+
+function on_end_scene()
+    do_render()
+
+    imgui.SetNextWindowSize(1100, 730, imgui.ImGuiCond_FirstUseEver or 2)
+    if not imgui.Begin("Model Viewer — Pose Tool") then
+        imgui.End()
+        return
+    end
+    local wx, wy = imgui.GetWindowPos()
+    local ww, wh = imgui.GetWindowSize()
+    local dl = imgui.get_window_draw_list()
+    dl:add_rect_filled(wx, wy, wx + ww, wy + wh, 0.10, 0.10, 0.10, 0.80, 8)
+
+    imgui.Text("FBX:")
+    imgui.SameLine()
+    local nf, fc = imgui.InputText("##fbxdir", cfg.fbx_folder)
+    if fc and nf then cfg.fbx_folder = nf end
+    imgui.SameLine()
+    if imgui.Button("Scan##top", 50, 22) then scan() end
+    imgui.SameLine()
+    local prev = (#cfg.fbx_list > 0)
+        and (cfg.fbx_list[cfg.sel_idx]:match("[/\\]([^/\\]+)$") or "?")
+        or  "none"
+    if imgui.BeginCombo("##fbxpick", prev) then
+        for i, p in ipairs(cfg.fbx_list) do
+            local name = p:match("[/\\]([^/\\]+)$") or p
+            if imgui.Selectable(name .. "##fi" .. i, i == cfg.sel_idx) then
+                cfg.sel_idx = i
+            end
+        end
+        imgui.EndCombo()
+    end
+    imgui.SameLine()
+    if imgui.Button("Load##top", 55, 22) then load_model() end
+    imgui.SameLine()
+    imgui.Text("Tex:")
+    imgui.SameLine()
+    local nt, tc = imgui.InputText("##texdir", cfg.tex_folder)
+    if tc and nt then cfg.tex_folder = nt end
+
+    imgui.Separator()
+
+    imgui.Text("Load:")
+    imgui.SameLine()
+    imgui.PushItemWidth(420)
+    local np2, pc2 = imgui.InputText("##direct_fbx", cfg.direct_fbx_path)
+    if pc2 and np2 then cfg.direct_fbx_path = np2 end
+    imgui.PopItemWidth()
+    imgui.SameLine()
+    if imgui.Button("Browse Folder##dbr", 100, 22) then
+        local folder = cfg.direct_fbx_path:match("^(.*[/\\])") or cfg.fbx_folder
+        local found  = model.scan_fbx(folder)
+        if #found > 0 then
+            cfg.fbx_list   = found
+            cfg.fbx_folder = folder
+            cfg.sel_idx    = 1
+            client.log("[viewer] scanned " .. #found .. " file(s) in " .. folder, 1)
+        else
+            client.log("[viewer] no FBX/OBJ found in " .. folder, 2)
+        end
+    end
+    imgui.SameLine()
+if imgui.Button("Load File##dlf", 75, 22) then
+    local path = cfg.direct_fbx_path
+    if not path or path == "" then
+        client.log("[viewer] no path entered — paste a full .fbx path", 2)
+    elseif not path:match("%.[Ff][Bb][Xx]$")
+       and not path:match("%.[Oo][Bb][Jj]$")
+       and not path:match("%.[Dd][Aa][Ee]$")
+       and not path:match("%.[Gg][Ll][Bb]$")
+       and not path:match("%.[Gg][Ll][Tt][Ff]$") then
+        client.log("[viewer] path must point to a model file (.fbx .obj .dae .glb .gltf), got: " .. path, 2)
+    else
+        local test = io.open(path, "rb")
+        if not test then
+            client.log("[viewer] file not found or not readable: " .. path, 3)
+        else
+            test:close()
+
+            for _, tex in pairs(cfg.tex_overrides) do
+                if tex then client.release_texture(tex) end
+            end
+            cfg.tex_overrides = {}
+            if cfg.mdl then model.free(cfg.mdl); cfg.mdl = nil end
+
+            local fbx_dir = path:match("^(.*)[/\\][^/\\]+$")
+            if fbx_dir and fbx_dir ~= "" then
+                cfg.tex_folder = fbx_dir
+                client.log("[viewer] tex folder auto-set to " .. fbx_dir, 1)
+            end
+
+            local m, err = model.load(path, cfg.tex_folder)
+            if not m then
+                client.log("[viewer] direct load failed: " .. (err or "?"), 3)
+            else
+                cfg.mdl = m
+                init_after_load(m)
+                for i = 1, model.mesh_count(m) do
+                    local mn = model.mesh_name(m, i)
+                    if mn then
+                        local tname = mn:gsub("^mt_", "tx_") .. "_Base.tga"
+                        local tex   = client.load_texture(cfg.tex_folder .. "\\" .. tname)
+                        if tex then
+                            cfg.tex_overrides[i] = tex
+                            model.set_mesh_tex(m, i, tex)
+                        end
+                    end
+                end
+                local already = false
+                for i, p in ipairs(cfg.fbx_list) do
+                    if p == path then cfg.sel_idx = i; already = true; break end
+                end
+                if not already then
+                    cfg.fbx_list[#cfg.fbx_list + 1] = path
+                    cfg.sel_idx = #cfg.fbx_list
+                end
+                client.log(string.format("[viewer] loaded %s  (%dm %db)  tex=%s",
+                    path:match("[/\\]([^/\\]+)$") or path,
+                    model.mesh_count(m), model.bone_count(m), cfg.tex_folder), 1)
+            end
+        end
+    end
+end
+
+imgui.Separator()
+
+    imgui.Text("Pose:")
+    imgui.SameLine()
+    imgui.PushItemWidth(420)
+    local npp, ppc = imgui.InputText("##posepath", cfg.pose_path)
+    if ppc and npp then cfg.pose_path = npp end
+    imgui.PopItemWidth()
+    imgui.SameLine()
+    if imgui.Button("Save Pose##psa", 80, 22) then
+        local path = cfg.pose_path
+        if path and path ~= "" then
+            if not path:match("%.lua$") then path = path .. ".lua" end
+            cfg.pose_path = path
+            pose_save(path)
+        else
+            client.log("[pose] enter a file path first", 2)
+        end
+    end
+    imgui.SameLine()
+    if imgui.Button("Load Pose##plo", 80, 22) then
+        local path = cfg.pose_path
+        if path and path ~= "" then
+            if not path:match("%.lua$") then path = path .. ".lua" end
+            cfg.pose_path = path
+            pose_load(path)
+        else
+            client.log("[pose] enter a file path first", 2)
+        end
+    end
+    imgui.SameLine()
+    if imgui.Button("Reset All##pra2", 80, 22) then
+        if cfg.mdl then
+            local bc = model.bone_count(cfg.mdl)
+            for i = 1, bc do
+                reset_bone(i)
+                model.bone_set_pose(cfg.mdl, i, 0,0,0,0,0,0)
+            end
+            client.log("[pose] all bones reset", 1)
+        end
+    end
+
+    imgui.Separator()
+
+    local avail_w, avail_h = imgui.GetContentRegionAvail()
+    local OW = 195
+    local PW = 215
+    local VW = math.max(80, avail_w - OW - PW - 22)
+    local CH = avail_h - 2
+
+    imgui.BeginChild("##outliner", OW, CH, true)
+
+    imgui.TextColored(1, 0.9, 0.3, 1, "Outliner")
+    imgui.Separator()
+
+    local mt = cfg.outliner_tab == "meshes"
+    local bt = cfg.outliner_tab == "bones"
+    if imgui.Button(mt and "[Meshes]" or " Meshes ", OW - 10, 20) then
+        cfg.outliner_tab = "meshes"
+    end
+    if imgui.Button(bt and "[Bones]" or " Bones  ", OW - 10, 20) then
+        cfg.outliner_tab = "bones"
+    end
+    imgui.Separator()
+
+    if cfg.outliner_tab == "meshes" then
+        ui_outliner_meshes(OW - 10)
+    else
+        ui_outliner_bones(OW - 10)
+    end
+
+    imgui.EndChild()
+    imgui.SameLine()
+
+    imgui.BeginChild("##viewport", VW, CH, false)
+
+    local function qtb(lbl, key)
+        local on = cfg[key]
+        local bl = on and ("[" .. lbl .. "]") or (" " .. lbl .. " ")
+        if imgui.Button(bl .. "##q_" .. lbl, lbl:len()*7 + 6, 20) then
+            cfg[key] = not cfg[key]
+        end
+        imgui.SameLine()
+    end
+    qtb("Tex",    "r_textured")
+    qtb("Chams",  "r_chams")
+    qtb("Wire",   "r_wire")
+    qtb("Skel",   "r_skeleton")
+    qtb("BBox",   "r_bbox")
+    qtb("ESP",    "r_esp")
+    qtb("Auto",   "r_autorot")
+
+    do
+        local on = cfg.gizmo_enabled
+        local lbl = on and "[Gizmo]" or " Gizmo "
+        if imgui.Button(lbl .. "##giz_tog", 60, 20) then
+            cfg.gizmo_enabled = not cfg.gizmo_enabled
+        end
+        imgui.SameLine()
+    end
+
+-- [CONTINUA en la PARTE 5/5 de LolModel2.lua]
+===== END: LolModel2.lua (PARTE 4/5) =====

@@ -1,0 +1,104 @@
+
+===== FILE: autocut tounge.txt (PARTE 3/3) =====
+local INSTANCE = {}
+_G.echidna_autocut_instance = INSTANCE
+local prev_cm = on_create_move
+function on_create_move(cmd, lp)
+    if prev_cm then pcall(prev_cm, cmd, lp) end
+    if _G.echidna_autocut_instance ~= INSTANCE then return end
+    local ok, err = pcall(tick, cmd, lp)
+    if not ok then dbg("error: " .. tostring(err)) end
+end
+
+pcall(function()
+    events.add_listener("ability_use", function()
+        if _G.echidna_autocut_instance == INSTANCE then fire_pending = true end
+    end)
+    events.add_listener("round_start", function()
+        if _G.echidna_autocut_instance == INSTANCE then tongue = nil; fire_pending = false; last_owner = nil end
+    end)
+end)
+
+local clock = (os and os.clock) or function() return GlobalVars.curtime() end
+local W = { value_first = nil, broken = false, last_flip = {} }
+local function btn(label) local ok, r = pcall(imgui.Button, label); return ok and r == true end
+local function text(s) pcall(imgui.Text, s) end
+local function detect_convention()
+    if W.value_first ~= nil or W.broken then return end
+    for _, fn in ipairs({ imgui.SliderInt, imgui.SliderFloat }) do
+        local ok, r1, r2 = pcall(fn, "##det_" .. NAME, 0, 0, 1)
+        if ok and type(r1) == "number" then W.value_first = true; return end
+        if ok and type(r2) == "number" then W.value_first = false; return end
+    end
+    W.broken = true
+end
+local function toggle(key, label)
+    local cur = CFG[key] and true or false
+    if W.broken or W.value_first == nil then
+        if btn((cur and "[ON]  " or "[off] ") .. label .. "##" .. key) then return not cur end
+        return cur
+    end
+    local ok, r1, r2 = pcall(imgui.Checkbox, label .. "##" .. key, cur)
+    if not ok then W.broken = true; return cur end
+    local new
+    if r2 == nil then
+        if W.value_first then new = r1 else new = (r1 == true) and not cur or cur end
+    elseif W.value_first then new = r1 else new = r2 end
+    if type(new) ~= "boolean" then W.broken = true; return cur end
+    if new ~= cur then
+        local f = clock()
+        if W.last_flip[key] and f - W.last_flip[key] < 0.05 then W.broken = true; return cur end
+        W.last_flip[key] = f
+    end
+    return new
+end
+local function box(key, label)
+    local v = toggle(key, label)
+    if CFG[key] ~= v then CFG[key] = v; save_cfg() end
+end
+
+local function draw_ui()
+    detect_convention()
+    pcall(imgui.Spacing); text("Auto Cut"); pcall(imgui.Separator)
+    box("enabled", "Enabled")
+    box("switch", "Switch to melee when a smoker aims at you")
+    if CFG.switch then box("switch_back", "Switch back to your gun after") end
+    box("wall", "Ignore smokers behind walls")
+    box("debug", "Debug in console")
+    pcall(imgui.Spacing); text("Status"); pcall(imgui.Separator)
+    text(string.format("Cuts %d   Dragged %d   Last: %s", stats.cuts, stats.dragged, stats.last))
+    text(string.format("Timing calibrated from %d grabs (%+.0f ms)", #corr, correction() * 1000))
+    if btn("Reset calibration##ac_reset") then corr = {}; save_calib() end
+end
+
+local tab_ok = false
+pcall(function()
+    local args = { "Auto Cut" }
+    local unpack_ = unpack or table.unpack
+    for _ = 1, 6 do
+        local ok, err = pcall(menu.add_main_tab, unpack_(args))
+        if ok then tab_ok = true; return end
+        local n, want = tostring(err):match("bad argument #(%d+) to '[^']*' %((%a+) expected")
+        n = tonumber(n)
+        if not n or n ~= #args + 1 then return end
+        if want == "string" then args[n] = "Auto Cut"
+        elseif want == "function" then args[n] = draw_ui
+        elseif want == "number" then args[n] = 0
+        elseif want == "boolean" then args[n] = true
+        else return end
+    end
+end)
+if not tab_ok then
+    local prev_paint = on_paint
+    function on_paint()
+        if prev_paint then pcall(prev_paint) end
+        local open = false
+        pcall(function() open = menu.is_open() end)
+        if not open then return end
+        if pcall(imgui.Begin, "Auto Cut##echidna_autocut") then pcall(draw_ui) end
+        pcall(imgui.End)
+    end
+end
+
+log("loaded")
+===== END: autocut tounge.txt (PARTE 3/3) =====
